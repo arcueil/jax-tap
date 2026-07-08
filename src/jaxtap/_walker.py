@@ -47,6 +47,11 @@ opaquely (same semantics as a primitive not in ``ops``): the address counter sti
 advances (addressing stability), but the node's body is NOT recursed into and no
 per-step tap_cb calls are emitted for it.  This is intentional and mirrors the
 ``ops`` filtering contract.
+
+``sample_every`` gating lives one level up, in the ``tap_cb`` closure built by
+``verbose()`` in ``__init__.py``.  That closure wraps the callback in a device-side
+``lax.cond(step % k == 0, ...)`` before passing it here, so the rewrites always
+call ``tap_cb`` unconditionally and correctness is preserved.
 """
 
 from __future__ import annotations
@@ -84,7 +89,6 @@ def interpret(
     args: tuple,
     tap_cb: TapCallback,
     ops: frozenset[str],
-    sample_every: int = 1,
     where: "Callable[[str], bool] | None" = None,
     max_depth: "int | None" = None,
 ) -> Any:
@@ -94,9 +98,6 @@ def interpret(
 
     Parameters
     ----------
-    sample_every:
-        Fire taps only on steps 0, k, 2k, …  The gate is applied device-side
-        inside the rewrite functions via ``lax.cond``.
     where:
         Optional path predicate; only CF nodes whose path satisfies ``where``
         are instrumented.  The address counter still advances for filtered-out
@@ -117,7 +118,6 @@ def interpret(
         tap_cb,
         ops,
         path="",
-        sample_every=sample_every,
         where=where,
         max_depth=max_depth,
     )
@@ -142,7 +142,6 @@ def _interp(
     tap_cb: TapCallback,
     ops: frozenset[str],
     path: str,
-    sample_every: int = 1,
     where: "Callable[[str], bool] | None" = None,
     max_depth: "int | None" = None,
 ) -> list:
@@ -156,19 +155,11 @@ def _interp(
 
     n_cf = 0  # per-level CF counter for stable path addressing
 
-    # Closure that propagates sample_every/where/max_depth through recursive calls;
+    # Closure that propagates where/max_depth through recursive calls;
     # _rewrites.py calls interp_fn with the same 6-argument signature.
     def _recurse(jaxpr_: Any, consts_: Any, args_: Any, tap_cb_: Any, ops_: Any, path_: Any) -> Any:
         return _interp(
-            jaxpr_,
-            consts_,
-            args_,
-            tap_cb_,
-            ops_,
-            path_,
-            sample_every=sample_every,
-            where=where,
-            max_depth=max_depth,
+            jaxpr_, consts_, args_, tap_cb_, ops_, path_, where=where, max_depth=max_depth
         )
 
     for eqn in jaxpr.eqns:
@@ -185,7 +176,7 @@ def _interp(
                 # Filter hooks: where- and max_depth-filtered nodes are bound
                 # opaquely (addressing counter already advanced above).
                 if (where is None or where(here)) and (max_depth is None or depth <= max_depth):
-                    outvals = rewrite_scan(eqn, invals, tap_cb, ops, here, _recurse, sample_every)
+                    outvals = rewrite_scan(eqn, invals, tap_cb, ops, here, _recurse)
                 else:
                     bind_params = eqn.primitive.get_bind_params(eqn.params)
                     outvals = eqn.primitive.bind(*invals, **bind_params)
@@ -196,7 +187,7 @@ def _interp(
                 here = f"{path}while[{cf_index}]"
                 depth = here.count("/")
                 if (where is None or where(here)) and (max_depth is None or depth <= max_depth):
-                    outvals = rewrite_while(eqn, invals, tap_cb, ops, here, _recurse, sample_every)
+                    outvals = rewrite_while(eqn, invals, tap_cb, ops, here, _recurse)
                 else:
                     bind_params = eqn.primitive.get_bind_params(eqn.params)
                     outvals = eqn.primitive.bind(*invals, **bind_params)
