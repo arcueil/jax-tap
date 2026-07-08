@@ -9,6 +9,7 @@ AYS probed them empirically.
 |--------|------|---------|
 | `ays_seams_vmap_grad_customjvp.py` | vmap-safety, grad-through-transform, custom_jvp opaque-bind | **1 DEFECT**: custom_jvp inside a scan body → `KeyError: 'subfuns'`. vmap + grad PASS (but were untested → regression gap). |
 | `rootcause_customjvp_subfuns.py` | root-cause of the crash | `jax.nn.softplus` → nested `jit` → `custom_jvp_call` eqn; the walker's naive `bind(*invals, **eqn.params)` cannot bind a primitive carrying `subfuns`. |
+| `round2_customvjp_sentinel_rule.py` | AYS **round 2** — attack the FIX (item 4) | 3 probes, all PASS: [C] `get_bind_params` returns a flat dict (arity correction confirmed); [B] a custom_jvp with a sentinel derivative (=42, ≠ primal 2x) propagates as 42³ through verbose → custom rule genuinely survives; [A] `custom_vjp` (untested by R1) forward+grad bitwise, sentinel cotangent 7³ survives. |
 
 ## The defect
 
