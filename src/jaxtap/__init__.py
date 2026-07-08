@@ -46,6 +46,7 @@ import jax
 from ._walker import interpret
 
 if TYPE_CHECKING:
+    from ._ashell import _RecordContext
     from .collectors import FlightRecorder
 
 __all__ = [
@@ -328,7 +329,7 @@ def verbose(
 
 
 def record(
-    f: Callable,
+    f: "Callable | None" = None,
     *,
     select: "Callable | None" = None,
     ops: "tuple[str, ...]" = ("scan", "while_loop"),
@@ -336,18 +337,54 @@ def record(
     where: "Callable[[str], bool] | None" = None,
     max_depth: "int | None" = None,
     taps: "Sequence[PrimitiveTap]" = (),
-) -> "tuple[Callable, FlightRecorder]":
+) -> "tuple[Callable, FlightRecorder] | _RecordContext":
     """
-    Wire a :class:`FlightRecorder` to ``verbose(f, ...)`` and return the pair.
+    Dual-form recorder for zero-code-change telemetry.
 
-    Usage::
+    **B-form** (callable given): wire a :class:`FlightRecorder` to
+    ``verbose(f, ...)`` and return the ``(tapped_fn, recorder)`` pair::
 
         g, rec = tap.record(f)
         g(*args)
         rec.df()
 
-    All keyword arguments are forwarded to :func:`verbose`.
+    **A-form** (no callable): return a context manager that monkeypatches
+    ``jax.lax.scan`` / ``jax.lax.while_loop`` for the duration of the block,
+    collecting events from any user code that runs inside — unmodified::
+
+        with tap.record(select=..., taps=[tap.on("cholesky")]) as rec:
+            result = anything(...)   # UNMODIFIED user code
+        rec.events  # list[TapEvent]
+        rec.df()    # pandas DataFrame
+
+        # Delete the ``with`` line → nothing was ever there.
+
+    All keyword arguments are identical in both forms and are forwarded to
+    :func:`verbose`.
+
+    A-form notes
+    ------------
+    Functions already JIT-compiled BEFORE entering the context will reuse the
+    cached trace and emit nothing inside it (no retrace → no new callbacks).
+    Workaround: ``jax.clear_caches()`` before entering.
+
+    With exactly ONE context active, any calling thread's scan/while is
+    attributed to it (thread delegation — enter on main, run on worker).
+    With >=2 simultaneous contexts, only the context whose owner thread matches
+    the calling thread receives events; bystanders pass through untapped.
     """
+    if f is None:
+        from ._ashell import _RecordContext as _RC
+
+        return _RC(
+            select=select,
+            ops=ops,
+            sample_every=sample_every,
+            where=where,
+            max_depth=max_depth,
+            taps=taps,
+        )
+
     from .collectors import FlightRecorder as _FlightRecorder
 
     recorder = _FlightRecorder()
