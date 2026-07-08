@@ -95,7 +95,8 @@ def interpret(
     Parameters
     ----------
     sample_every:
-        Fire taps only on steps 0, k, 2k, …  Gated device-side via ``lax.cond``.
+        Fire taps only on steps 0, k, 2k, …  The gate is applied device-side
+        inside the rewrite functions via ``lax.cond``.
     where:
         Optional path predicate; only CF nodes whose path satisfies ``where``
         are instrumented.  The address counter still advances for filtered-out
@@ -184,9 +185,7 @@ def _interp(
                 # Filter hooks: where- and max_depth-filtered nodes are bound
                 # opaquely (addressing counter already advanced above).
                 if (where is None or where(here)) and (max_depth is None or depth <= max_depth):
-                    outvals = rewrite_scan(
-                        eqn, invals, tap_cb, ops, here, _recurse, sample_every=sample_every
-                    )
+                    outvals = rewrite_scan(eqn, invals, tap_cb, ops, here, _recurse, sample_every)
                 else:
                     bind_params = eqn.primitive.get_bind_params(eqn.params)
                     outvals = eqn.primitive.bind(*invals, **bind_params)
@@ -197,9 +196,7 @@ def _interp(
                 here = f"{path}while[{cf_index}]"
                 depth = here.count("/")
                 if (where is None or where(here)) and (max_depth is None or depth <= max_depth):
-                    outvals = rewrite_while(
-                        eqn, invals, tap_cb, ops, here, _recurse, sample_every=sample_every
-                    )
+                    outvals = rewrite_while(eqn, invals, tap_cb, ops, here, _recurse, sample_every)
                 else:
                     bind_params = eqn.primitive.get_bind_params(eqn.params)
                     outvals = eqn.primitive.bind(*invals, **bind_params)

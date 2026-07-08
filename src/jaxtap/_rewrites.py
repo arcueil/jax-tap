@@ -10,13 +10,10 @@ entirely by the wrapper.  Taps fire via ``jax.debug.callback(..., ordered=False)
 which is vmap-safe (per-lane calls; ``ordered=True`` is not legal inside mapped
 computation).
 
-sample_every
-------------
-When ``sample_every > 1`` the tap fires only on steps 0, k, 2k, …  The gate
-is implemented DEVICE-SIDE using ``lax.cond(step % k == 0, fire_fn, noop_fn)``
-inside the scan/while body so that non-firing steps incur zero host-crossing.
-Bitwise identity is preserved: the gate wraps only the callback call, never
-the carry computation.
+``sample_every`` gating lives one level up, in the ``tap_cb`` closure built by
+``verbose()`` in ``__init__.py``.  That closure wraps the callback in a device-side
+``lax.cond(step % k == 0, ...)`` before passing it here, so the rewrites always
+call ``tap_cb`` unconditionally and correctness is preserved.
 """
 
 from __future__ import annotations
@@ -92,21 +89,18 @@ def rewrite_scan(
         )
         new_carry = outs[:ncar]
         ys = outs[ncar:]
-
         # Gate the tap device-side: fire only when step % k == 0.
-        # lax.cond keeps both branches pure (noop returns None-result).
-        def _fire(_):
-            tap_cb(here, step, *new_carry)
-
-        def _noop(_):
-            pass
-
+        # lax.cond is used so non-firing steps incur no host-boundary crossing.
         if sample_every == 1:
-            # Avoid the lax.cond overhead on the common path.
+            # Avoid lax.cond overhead on the common path.
             tap_cb(here, step, *new_carry)
         else:
-            jax.lax.cond(step % k == 0, _fire, _noop, None)
-
+            jax.lax.cond(
+                step % k == 0,
+                lambda _: tap_cb(here, step, *new_carry),
+                lambda _: None,
+                None,
+            )
         return (new_carry, step + 1), ys
 
     (carry_out, _), ys = jax.lax.scan(
@@ -160,18 +154,15 @@ def rewrite_while(
     def body_fn(carry_step):
         carry, step = carry_step
         new_carry = interp_fn(bj.jaxpr, bj.consts, [*bconsts, *carry], tap_cb, ops, here + "/")
-
-        def _fire(_):
-            tap_cb(here, step, *new_carry)
-
-        def _noop(_):
-            pass
-
         if sample_every == 1:
             tap_cb(here, step, *new_carry)
         else:
-            jax.lax.cond(step % k == 0, _fire, _noop, None)
-
+            jax.lax.cond(
+                step % k == 0,
+                lambda _: tap_cb(here, step, *new_carry),
+                lambda _: None,
+                None,
+            )
         return (new_carry, step + 1)
 
     carry_out, _ = jax.lax.while_loop(cond_fn, body_fn, (init, jnp.int32(0)))

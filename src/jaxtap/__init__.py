@@ -191,20 +191,27 @@ def verbose(
 
             jax.debug.callback(_host, step, *carry_leaves, ordered=False)
 
-    tap_cb = _base_tap_cb
+    # Wrap with sample_every gate (device-side lax.cond) when k > 1.
+    # Both branches return None (empty pytree) so lax.cond type-checks;
+    # JAX's effects system ensures the debug callback fires only in the true branch.
+    if sample_every > 1:
+        _uncapped = _base_tap_cb
+
+        def tap_cb(path: str, step: Any, *carry_leaves: Any) -> None:
+            jax.lax.cond(
+                step % sample_every == 0,
+                lambda _: _uncapped(path, step, *carry_leaves),
+                lambda _: None,
+                step,
+            )
+
+    else:
+        tap_cb = _base_tap_cb
 
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         if kwargs:
             raise TypeError("jaxtap.verbose does not support keyword arguments to f")
-        return interpret(
-            f,
-            args,
-            tap_cb,
-            internal_ops,
-            sample_every=sample_every,
-            where=where,
-            max_depth=max_depth,
-        )
+        return interpret(f, args, tap_cb, internal_ops, where=where, max_depth=max_depth)
 
     return wrapped
 
