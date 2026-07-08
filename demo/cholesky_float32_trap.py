@@ -24,8 +24,10 @@ The sampler body below contains ZERO logging code — it just defines
    primitive kind — no reconstruction), and the ``on_step`` callback LOUDLY
    ANNOUNCES the first non-finite factor LIVE, mid-loop, before the scan
    finishes. Done testing? Delete the ``with`` block — nothing was ever there.
-3. The trap is FLOAT32-specific: under float64 the first bad step moves far
-   later — which is exactly why it hid in production.
+3. The trap is FLOAT32-specific: the kernel's conditioning plateaus at a
+   realistic lambda_min = 1e-12 — below float32's eps (silently singular) but
+   comfortably inside float64's range. Under float64 the trap NEVER fires:
+   float64 genuinely fixes it, exactly as it did for the original bug.
 
 Run:  uv run python demo/cholesky_float32_trap.py
 """
@@ -42,13 +44,17 @@ def make_sampler(n_steps: int):
     """A toy 'sampler loop'. NOTE: the body contains NO logging/telemetry code.
 
     Each step Choleskys a 2x2 kernel whose conditioning worsens geometrically
-    (correlation c_k -> 1; lambda_min = 10**(-k)), then does a
+    (correlation c_k -> 1; lambda_min = 10**(-k), plateauing at 1e-12), then does a
     dual-averaging-style update that freezes when the log-density goes
     non-finite (mimicking the real DA dodge)."""
 
     def step(carry, _):
         log_step, k = carry
-        c = 1.0 - 10.0 ** (-k)
+        # Conditioning worsens geometrically then PLATEAUS at lambda_min = 1e-12
+        # (realistic kernels have bounded conditioning). 1e-12 is far below
+        # float32 eps (~1.2e-7) -> f32 sees a silently singular matrix; far
+        # above float64 eps (~2.2e-16) -> f64 is fine. That asymmetry IS the trap.
+        c = 1.0 - 10.0 ** (-jnp.minimum(k, 12.0))
         M = jnp.array([[1.0, c], [c, 1.0]], dtype=c.dtype)
         L = jnp.linalg.cholesky(M)  # <-- the only line that matters
         logdens = -0.5 * 2.0 * jnp.sum(jnp.log(jnp.diag(L)))
@@ -100,7 +106,6 @@ def run_demo(x64: bool) -> dict:
 
 
 def main() -> None:
-    print(__doc__)
     print("=" * 70)
 
     print("\nFLOAT32 (production default):")
@@ -131,7 +136,7 @@ def main() -> None:
         f"[{'PASS' if caught else 'FAIL'}]"
     )
     print(
-        f"        the trap is float32-specific (float64 defers/avoids it) "
+        f"        the trap is float32-specific (float64 genuinely fixes it) "
         f"[{'PASS' if moved else 'FAIL'}]"
     )
 
