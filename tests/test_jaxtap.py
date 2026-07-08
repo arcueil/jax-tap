@@ -505,10 +505,13 @@ def test_vmap_safety():
 
 def test_grad_through_transform():
     """
-    AYS-R1: jax.grad(verbose(f)) must be bitwise identical to jax.grad(f),
+    AYS-R1/R2: jax.grad(verbose(f)) must be bitwise identical to jax.grad(f),
     both for plain programs and for programs containing @custom_jvp functions.
     The get_bind_params fix must preserve the custom JVP rule so the gradient
     is computed via the custom derivative, not by inlining the primal.
+    AYS-R2 strengthening: a sentinel JVP (derivative=42, distinct from primal
+    2x) must propagate as 42^3=74088, proving the custom rule genuinely survives
+    rather than accidentally matching primal autodiff.
     """
     N = 5
     carry0 = jnp.float32(1.0)
@@ -543,3 +546,86 @@ def test_grad_through_transform():
     )
     jax.block_until_ready(got_g_cjvp)
     assert bitwise_eq(ref_g_cjvp, got_g_cjvp), "grad through custom_jvp scan not bitwise identical"
+
+
+def test_custom_jvp_sentinel_rule():
+    """
+    AYS-R2 probe [B]: a @custom_jvp whose derivative is a SENTINEL (42, distinct
+    from the primal 2x) must propagate as 42^3=74088 through verbose(), proving
+    the custom rule genuinely survives rather than accidentally matching primal
+    autodiff.  Bitwise equality confirms rule-identical execution; the sentinel
+    value proves which rule is active.
+    """
+    from jax import custom_jvp as _custom_jvp
+
+    @_custom_jvp
+    def f_sentinel(x):
+        return x * x  # primal derivative would be 2x
+
+    @f_sentinel.defjvp
+    def _f_sentinel_jvp(primals, tangents):
+        (x,), (dx,) = primals, tangents
+        return f_sentinel(x), jnp.float32(42.0) * dx  # sentinel: 42, not 2x
+
+    xs3 = jnp.arange(3.0, dtype=jnp.float32)
+
+    def sentinel_loss(theta):
+        final, _ = jax.lax.scan(lambda c, x: (f_sentinel(c + x), c), theta, xs3)
+        return final
+
+    theta = jnp.float32(0.7)
+    ref_g = jax.grad(sentinel_loss)(theta)
+    got_g = jax.grad(tap.verbose(sentinel_loss, on_step=lambda e: None))(theta)
+    jax.block_until_ready(got_g)
+
+    assert bitwise_eq(ref_g, got_g), "sentinel JVP grad not bitwise identical through verbose"
+    # 42^3 = 74088 confirms sentinel rule active; primal autodiff would give ~35
+    assert (
+        float(got_g) == 74088.0
+    ), f"sentinel JVP chain rule broken: expected 74088.0 (42^3), got {float(got_g)}"
+
+
+def test_custom_vjp_through_transform():
+    """
+    AYS-R2: a @custom_vjp function (different primitive: custom_vjp_call) inside
+    a scan body must work with verbose() — forward bitwise and grad bitwise.
+    Sentinel backward rule (cotangent ×7, not cos(x)) proves the VJP rule
+    genuinely survives through get_bind_params dispatch: expected grad = 7^3 = 343.
+    """
+    from jax import custom_vjp as _custom_vjp
+
+    @_custom_vjp
+    def f_vjp(x):
+        return jnp.sin(x)
+
+    def _f_vjp_fwd(x):
+        return f_vjp(x), x
+
+    def _f_vjp_bwd(res, g):
+        return (jnp.float32(7.0) * g,)  # sentinel: cotangent ×7, not cos(x)
+
+    f_vjp.defvjp(_f_vjp_fwd, _f_vjp_bwd)
+
+    xs3 = jnp.arange(3.0, dtype=jnp.float32)
+
+    def loss_vjp(theta):
+        final, _ = jax.lax.scan(lambda c, x: (f_vjp(c + x), c), theta, xs3)
+        return final
+
+    theta = jnp.float32(0.5)
+
+    # Forward bitwise identity
+    ref_fwd = loss_vjp(theta)
+    got_fwd, events = _collect(loss_vjp, theta)
+    assert bitwise_eq(ref_fwd, got_fwd), "custom_vjp forward not bitwise identical"
+    assert len([e for e in events if e.path == "scan[0]"]) == 3
+
+    # Grad bitwise identity
+    ref_g = jax.grad(loss_vjp)(theta)
+    got_g = jax.grad(tap.verbose(loss_vjp, on_step=lambda e: None))(theta)
+    jax.block_until_ready(got_g)
+    assert bitwise_eq(ref_g, got_g), "custom_vjp grad not bitwise identical through verbose"
+    # 7^3 = 343 proves VJP sentinel rule is active, not cos(x)-based autodiff
+    assert (
+        float(got_g) == 343.0
+    ), f"sentinel VJP chain rule broken: expected 343.0 (7^3), got {float(got_g)}"
