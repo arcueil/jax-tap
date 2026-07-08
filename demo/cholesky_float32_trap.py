@@ -1,4 +1,4 @@
-"""Case-ledger 01 — the float32 Cholesky trap (GP regression, 2026-05-12).
+"""demo — the float32 Cholesky trap (GP regression, 2026-05-12).
 
 ORIGINAL BUG (class: primitive / silent-NaN)
 --------------------------------------------
@@ -29,7 +29,7 @@ WHAT THIS DEMO SHOWS
 4. The trap is FLOAT32-specific: rerun under float64 and the first-bad step moves
    far later (or never within the horizon) — this is why it hid in production.
 
-Run:  uv run python case_ledger/01_float32_cholesky_trap.py
+Run:  uv run python demo/cholesky_float32_trap.py
 """
 
 from __future__ import annotations
