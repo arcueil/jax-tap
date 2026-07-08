@@ -36,8 +36,6 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import numpy as np
-
 import jaxtap as tap
 
 
@@ -94,8 +92,11 @@ def run_demo(x64: bool) -> dict:
     g, rec = tap.record(run, select=cholesky_factor_finite)
     jax.block_until_ready(g(log_step0))
     first_bad = next(
-        (e.step for e in sorted(rec.events, key=lambda e: e.step)
-         if not bool(e.value["factor_finite"])),
+        (
+            e.step
+            for e in sorted(rec.events, key=lambda e: e.step)
+            if not bool(e.value["factor_finite"])
+        ),
         None,
     )
     return {"final_log_step": final_log_step, "first_bad_step": first_bad, "n_steps": n_steps}
@@ -111,8 +112,10 @@ def main() -> None:
     print("    -> the loop 'completed'; a large-negative frozen step size is the")
     print("       only clue, and R-hat/divergence checks would still look fine.")
     if r32["first_bad_step"] is not None:
-        print(f"  jaxtap CAUGHT IT:    first non-finite Cholesky at step "
-              f"{r32['first_bad_step']} / {r32['n_steps']}")
+        print(
+            f"  jaxtap CAUGHT IT:    first non-finite Cholesky at step "
+            f"{r32['first_bad_step']} / {r32['n_steps']}"
+        )
     else:
         print("  jaxtap: no non-finite step within horizon")
 
@@ -128,10 +131,14 @@ def main() -> None:
     moved = (r64["first_bad_step"] is None) or (
         r32["first_bad_step"] is not None and r64["first_bad_step"] > r32["first_bad_step"]
     )
-    print(f"RESULT: jaxtap localized the silent float32 NaN at its first-bad step "
-          f"[{'PASS' if caught else 'FAIL'}]")
-    print(f"        the trap is float32-specific (float64 defers/avoids it) "
-          f"[{'PASS' if moved else 'FAIL'}]")
+    print(
+        f"RESULT: jaxtap localized the silent float32 NaN at its first-bad step "
+        f"[{'PASS' if caught else 'FAIL'}]"
+    )
+    print(
+        f"        the trap is float32-specific (float64 defers/avoids it) "
+        f"[{'PASS' if moved else 'FAIL'}]"
+    )
 
 
 if __name__ == "__main__":
