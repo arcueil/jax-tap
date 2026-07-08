@@ -18,7 +18,7 @@ call ``tap_cb`` unconditionally and correctness is preserved.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import jax
 import jax.numpy as jnp
@@ -36,6 +36,7 @@ def rewrite_scan(
     ops: frozenset[str],
     here: str,
     interp_fn: Callable,
+    outer_step: Any = None,
 ) -> list:
     """
     Rebuild a scan equation with a per-step counter in the carry and a
@@ -73,6 +74,8 @@ def rewrite_scan(
         # x arrives with the same pytree structure as xs.
         # Unpack into a flat list for the jaxpr body call.
         x_flat = list(x) if isinstance(x, (list, tuple)) else [x]
+        # Pass the live step as the 7th argument so _interp can thread it to
+        # primitive taps (including those hidden behind jit boundaries).
         outs = interp_fn(
             body.jaxpr,
             body.consts,
@@ -80,6 +83,7 @@ def rewrite_scan(
             tap_cb,
             ops,
             here + "/",
+            step,
         )
         new_carry = outs[:ncar]
         ys = outs[ncar:]
@@ -106,6 +110,7 @@ def rewrite_while(
     ops: frozenset[str],
     here: str,
     interp_fn: Callable,
+    outer_step: Any = None,
 ) -> list:
     """
     Rebuild a while_loop equation with a step counter augmented into the carry
@@ -133,7 +138,10 @@ def rewrite_while(
 
     def body_fn(carry_step):
         carry, step = carry_step
-        new_carry = interp_fn(bj.jaxpr, bj.consts, [*bconsts, *carry], tap_cb, ops, here + "/")
+        # Pass the live step as the 7th argument for primitive tap threading.
+        new_carry = interp_fn(
+            bj.jaxpr, bj.consts, [*bconsts, *carry], tap_cb, ops, here + "/", step
+        )
         # tap_cb already has sample_every gating baked in (see verbose() in __init__.py).
         tap_cb(here, step, *new_carry)
         return (new_carry, step + 1)

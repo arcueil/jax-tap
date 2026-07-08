@@ -66,6 +66,36 @@ original ``donated_invars``/``in_shardings``/``out_shardings`` params — a know
 limitation acceptable for pre-v1.  For ``remat2``, ``jax.checkpoint`` is used
 with ``prevent_cse`` and ``policy`` threaded from the original eqn params.
 
+Step threading (M1a)
+--------------------
+``_interp`` now carries a ``step`` parameter — the live enclosing loop step
+value, threaded from the rewrites.  This enables primitive taps to report
+the correct enclosing step even when the primitive is nested several boundaries
+deep.  Outside any loop the sentinel ``jnp.int32(-1)`` is used (callers see
+``TapEvent.step == -1``).
+
+For ``jit``/``pjit``/``closed_call`` boundaries the step is passed as an
+**explicit argument** to the fresh ``jax.jit`` wrapper because JIT creates a
+new compilation context — closed-over abstract tracers from an outer scan body
+are not automatically forwarded across a JIT boundary.  For ``cond``/``switch``
+and ``remat2`` the step is captured via Python closure, which is safe because
+those primitives trace their sub-functions in the current (outer) tracing
+context.
+
+Primitive taps (M1a)
+--------------------
+After binding any NON-boundary, NON-AD eqn, ``_interp`` checks the eqn's
+primitive name against the ``prim_taps`` sequence.  On a match it fires
+``prim_tap_fn(path, step, outvals_tuple, spec)`` which lives in ``__init__.py``
+and wraps ``jax.debug.callback`` → ``_guard``-wrapped ``on_step``.
+
+Primitive tap addressing: ``{enclosing_path}{prim_name}[{j}]`` where ``j`` is a
+per-level, per-prim-name counter (separate from the boundary counter ``n_cf``).
+``sample_every`` does NOT gate primitive taps in M1a (loop-carry taps only).
+Primitive taps only fire inside code the walker descends into; loops filtered
+by ``ops``/``where``/``max_depth`` are not descended, so primitive taps inside
+them are silent.
+
 Known v1 boundaries (not fixed here, documented)
 -------------------------------------------------
 A1 — vmap(while_loop): ``while_loop`` inside a ``vmap`` emits ghost events
@@ -99,9 +129,10 @@ call ``tap_cb`` unconditionally and correctness is preserved.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import jax
+import jax.numpy as jnp
 from jax.extend import core as jax_core
 
 from ._rewrites import rewrite_scan, rewrite_while
@@ -137,6 +168,8 @@ def interpret(
     ops: frozenset[str],
     where: "Callable[[str], bool] | None" = None,
     max_depth: "int | None" = None,
+    prim_taps: Sequence[Any] = (),
+    prim_tap_fn: "Callable | None" = None,
 ) -> Any:
     """
     Trace ``f(*args)`` once with ``make_jaxpr(return_shape=True)`` and run
@@ -152,6 +185,12 @@ def interpret(
         Optional depth limit.  CF nodes at depth > max_depth (depth = number
         of ``/`` in the path) are bound opaquely.  With boundary-visible
         addressing, jit/cond/remat boundaries each add 1 to the depth.
+    prim_taps:
+        Sequence of ``PrimitiveTap`` specs.  After binding any non-boundary eqn
+        whose ``primitive.name`` matches a spec, fire ``prim_tap_fn``.
+    prim_tap_fn:
+        Callable ``(path, step, outvals_tuple, spec)`` that fires the host
+        callback.  Required when ``prim_taps`` is non-empty.
 
     Returns the output pytree of ``f(*args)``.
     """
@@ -167,6 +206,9 @@ def interpret(
         path="",
         where=where,
         max_depth=max_depth,
+        step=None,
+        prim_taps=prim_taps,
+        prim_tap_fn=prim_tap_fn,
     )
     return jax.tree_util.tree_unflatten(out_tree, out_flat)
 
@@ -191,8 +233,28 @@ def _interp(
     path: str,
     where: "Callable[[str], bool] | None" = None,
     max_depth: "int | None" = None,
+    step: Any = None,
+    prim_taps: Sequence[Any] = (),
+    prim_tap_fn: "Callable | None" = None,
 ) -> list:
-    """Evaluate ``jaxpr`` against ``args``, rewriting CF primitives in ``ops``."""
+    """Evaluate ``jaxpr`` against ``args``, rewriting CF primitives in ``ops``.
+
+    Parameters
+    ----------
+    step:
+        Live step value from the enclosing loop.  ``None`` on entry from
+        ``interpret()`` — normalised to ``jnp.int32(-1)`` (outside-any-loop
+        sentinel) at the start of this function.
+    prim_taps:
+        Sequence of ``PrimitiveTap`` specs for primitive-name tapping.
+    prim_tap_fn:
+        Host callback builder; called as ``prim_tap_fn(path, step, outvals, spec)``
+        for each matched primitive.
+    """
+    # Normalise sentinel: None means "not inside any loop".
+    if step is None:
+        step = jnp.int32(-1)
+
     env: dict = {}
 
     for v, val in zip(jaxpr.constvars, consts):
@@ -201,12 +263,33 @@ def _interp(
         env[v] = val
 
     n_cf = 0  # per-level boundary counter for stable path addressing
+    # Per-level, per-prim-name occurrence counter for primitive tap addressing.
+    n_prim_tap: dict[str, int] = {}
 
-    # Closure that propagates where/max_depth through recursive calls;
-    # _rewrites.py calls interp_fn with the same 6-argument signature.
-    def _recurse(jaxpr_: Any, consts_: Any, args_: Any, tap_cb_: Any, ops_: Any, path_: Any) -> Any:
+    # Closure that propagates where/max_depth/step/prim_taps through recursive
+    # calls; _rewrites.py calls interp_fn with a 7-argument signature
+    # (the 7th being the live step).
+    def _recurse(
+        jaxpr_: Any,
+        consts_: Any,
+        args_: Any,
+        tap_cb_: Any,
+        ops_: Any,
+        path_: Any,
+        step_: Any = None,
+    ) -> Any:
         return _interp(
-            jaxpr_, consts_, args_, tap_cb_, ops_, path_, where=where, max_depth=max_depth
+            jaxpr_,
+            consts_,
+            args_,
+            tap_cb_,
+            ops_,
+            path_,
+            where=where,
+            max_depth=max_depth,
+            step=step_,
+            prim_taps=prim_taps,
+            prim_tap_fn=prim_tap_fn,
         )
 
     for eqn in jaxpr.eqns:
@@ -225,7 +308,7 @@ def _interp(
                 # Filter hooks: where- and max_depth-filtered nodes are bound
                 # opaquely (addressing counter already advanced above).
                 if (where is None or where(here)) and (max_depth is None or depth <= max_depth):
-                    outvals = rewrite_scan(eqn, invals, tap_cb, ops, here, _recurse)
+                    outvals = rewrite_scan(eqn, invals, tap_cb, ops, here, _recurse, step)
                 else:
                     bind_params = eqn.primitive.get_bind_params(eqn.params)
                     outvals = eqn.primitive.bind(*invals, **bind_params)
@@ -236,7 +319,7 @@ def _interp(
                 here = f"{path}while[{cf_index}]"
                 depth = here.count("/")
                 if (where is None or where(here)) and (max_depth is None or depth <= max_depth):
-                    outvals = rewrite_while(eqn, invals, tap_cb, ops, here, _recurse)
+                    outvals = rewrite_while(eqn, invals, tap_cb, ops, here, _recurse, step)
                 else:
                     bind_params = eqn.primitive.get_bind_params(eqn.params)
                     outvals = eqn.primitive.bind(*invals, **bind_params)
@@ -254,6 +337,9 @@ def _interp(
 
                 def _make_branch(branch_jaxpr: "jax_core.ClosedJaxpr", branch_idx: int) -> Callable:
                     branch_path = f"{path}cond[{cf_index}]/b{branch_idx}/"
+                    # Capture step via default arg so each branch closure holds
+                    # the correct enclosing step at definition time.
+                    _step = step
 
                     def branch_fn(*ops_tuple: Any) -> tuple:
                         return tuple(
@@ -264,6 +350,7 @@ def _interp(
                                 tap_cb,
                                 ops,
                                 branch_path,
+                                _step,
                             )
                         )
 
@@ -282,9 +369,13 @@ def _interp(
                 prevent_cse = eqn.params["prevent_cse"]
                 policy = eqn.params["policy"]
                 new_path = f"{path}remat[{cf_index}]/"
+                # Capture step via default arg for safe closure semantics.
+                _step = step
 
-                def _inner_remat(*flat_in: Any, _j: Any = inner_jaxpr, _p: str = new_path) -> tuple:
-                    return tuple(_recurse(_j, [], list(flat_in), tap_cb, ops, _p))
+                def _inner_remat(
+                    *flat_in: Any, _j: Any = inner_jaxpr, _p: str = new_path, _s: Any = _step
+                ) -> tuple:
+                    return tuple(_recurse(_j, [], list(flat_in), tap_cb, ops, _p, _s))
 
                 result = jax.checkpoint(_inner_remat, prevent_cse=prevent_cse, policy=policy)(
                     *invals
@@ -296,15 +387,23 @@ def _interp(
                 # The inner jaxpr is a ClosedJaxpr; recurse into it with the
                 # extended path, then re-wrap in jax.jit to preserve the compile
                 # boundary.
+                # Step threading: step is passed as an explicit ARGUMENT to the
+                # fresh jax.jit wrapper (not captured via closure) because jit
+                # creates a new compilation context.  Closed-over abstract tracers
+                # from an enclosing scan body trace are not forwarded across a
+                # JIT boundary, causing incorrect constant-folding.  Passing step
+                # explicitly makes it a proper JIT input that changes per iteration.
                 # Limitation: the fresh jax.jit does not thread the original
                 # donated_invars/in_shardings/out_shardings params (acceptable pre-v1).
                 inner = eqn.params["jaxpr"]  # ClosedJaxpr
                 new_path = f"{path}jit[{cf_index}]/"
 
-                def _inner_jit(*flat_in: Any, _j: Any = inner, _p: str = new_path) -> Any:
-                    return _recurse(_j.jaxpr, _j.consts, list(flat_in), tap_cb, ops, _p)
+                def _inner_jit(*flat_in_and_step: Any, _j: Any = inner, _p: str = new_path) -> Any:
+                    # step is the last positional argument.
+                    *flat_in, step_in = flat_in_and_step
+                    return _recurse(_j.jaxpr, _j.consts, list(flat_in), tap_cb, ops, _p, step_in)
 
-                result = jax.jit(_inner_jit)(*invals)
+                result = jax.jit(_inner_jit)(*invals, step)
                 outvals = list(result) if isinstance(result, (list, tuple)) else [result]
 
             else:
@@ -333,6 +432,17 @@ def _interp(
             outvals = eqn.primitive.bind(*invals, **bind_params)
             if not eqn.primitive.multiple_results:
                 outvals = [outvals]
+
+            # Primitive tap: check if any spec matches this primitive name.
+            # Fires on EVERY matched non-boundary, non-AD primitive.
+            if prim_taps and prim_tap_fn is not None:
+                matching = [spec for spec in prim_taps if spec.prim_name == prim_name]
+                if matching:
+                    j = n_prim_tap.get(prim_name, 0)
+                    n_prim_tap[prim_name] = j + 1
+                    tap_path = f"{path}{prim_name}[{j}]"
+                    for spec in matching:
+                        prim_tap_fn(tap_path, step, tuple(outvals), spec)
 
         for v, val in zip(eqn.outvars, outvals):
             env[v] = val

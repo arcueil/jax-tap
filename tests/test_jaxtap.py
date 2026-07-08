@@ -864,3 +864,328 @@ def test_jit_boundary_path_format():
     # Paths without jit boundary
     assert "scan[0]" in paths2
     assert "scan[0]/scan[0]" in paths2
+
+
+# ---------------------------------------------------------------------------
+# M1a: primitive tap tests
+# ---------------------------------------------------------------------------
+
+
+def _chol_scan_n(x0, n):
+    """Scan body computing a Cholesky factor; user body has NO logging code."""
+
+    def body(carry, _):
+        c = 1.0 - 10.0 ** (-carry)
+        M = jnp.array([[1.0, c], [c, 1.0]], dtype=c.dtype)
+        L = jnp.linalg.cholesky(M)
+        logdens = -0.5 * 2.0 * jnp.sum(jnp.log(jnp.diag(L)))
+        return carry + 1.0, logdens
+
+    return jax.lax.scan(body, x0, None, length=n)
+
+
+def test_prim_tap_basic_in_scan():
+    """
+    M1a: tap.on("cholesky") inside a scan fires N times with live step values
+    0..N-1 and a stable path including both scan and jit segments.
+    User body has NO logging code.  Bitwise identity holds.
+    """
+    N = 5
+    x0 = jnp.float32(1.0)
+
+    def f(x):
+        return _chol_scan_n(x, N)
+
+    ref = f(x0)
+
+    prim_events: list[tap.TapEvent] = []
+    loop_events: list[tap.TapEvent] = []
+
+    def cb(e: tap.TapEvent) -> None:
+        (prim_events if "cholesky" in e.path else loop_events).append(e)
+
+    got = tap.verbose(f, on_step=cb, taps=[tap.on("cholesky")])(x0)
+    jax.block_until_ready(got)
+
+    assert bitwise_eq(ref, got), "primitive tap broke bitwise identity"
+    assert len(prim_events) == N, f"expected {N} cholesky events, got {len(prim_events)}"
+    assert sorted(e.step for e in prim_events) == list(
+        range(N)
+    ), f"step values wrong: {[e.step for e in prim_events]}"
+    paths = {e.path for e in prim_events}
+    assert any(
+        "cholesky[0]" in p for p in paths
+    ), f"expected cholesky[0] in path, got {sorted(paths)}"
+    # Loop events still fire unchanged
+    assert len(loop_events) == N, f"expected {N} loop events, got {len(loop_events)}"
+
+
+def test_prim_tap_jit_hidden_cholesky():
+    """
+    M1a: jnp.linalg.cholesky hides behind a jit boundary in the scan body's
+    jaxpr.  The tap must fire and the path must include both 'jit' and
+    'cholesky'.  Pattern: scan[0]/jit[0]/cholesky[0].
+    """
+    N = 4
+    x0 = jnp.float32(1.0)
+
+    def f(x):
+        return _chol_scan_n(x, N)
+
+    ref = f(x0)
+    events: list[tap.TapEvent] = []
+    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(x0)
+    jax.block_until_ready(got)
+
+    chol_events = [e for e in events if "cholesky" in e.path]
+    assert len(chol_events) == N, f"expected {N} cholesky events, got {len(chol_events)}"
+
+    paths = {e.path for e in chol_events}
+    # jit boundary must be visible in the path
+    assert any(
+        "jit" in p for p in paths
+    ), f"expected 'jit' in path (cholesky is jit-wrapped), got {sorted(paths)}"
+    assert any(
+        "scan" in p and "jit" in p and "cholesky" in p for p in paths
+    ), f"expected scan/jit/cholesky chain in path, got {sorted(paths)}"
+    assert bitwise_eq(ref, got), "jit-hidden cholesky tap broke bitwise identity"
+
+
+def test_prim_tap_outside_loop():
+    """
+    M1a: a primitive tap firing outside any scan/while loop gets step == -1.
+    """
+
+    def f(x):
+        M = jnp.array([[1.0, 0.5], [0.5, 1.0]])
+        L = jnp.linalg.cholesky(M)
+        return L[0, 0] + x
+
+    x = jnp.float32(1.0)
+    ref = f(x)
+    events: list[tap.TapEvent] = []
+    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(x)
+    jax.block_until_ready(got)
+
+    chol_events = [e for e in events if "cholesky" in e.path]
+    assert len(chol_events) == 1, f"expected 1 outside-loop cholesky event, got {len(chol_events)}"
+    assert chol_events[0].step == -1, f"outside-loop step must be -1, got {chol_events[0].step}"
+    assert bitwise_eq(ref, got), "outside-loop tap broke bitwise identity"
+
+
+def test_prim_tap_select_none_and_bool():
+    """
+    M1a: select=None → TapEvent.value is a tuple of output arrays.
+    select reducing to a bool scalar → value is a 0-d bool array.
+    """
+    N = 3
+    x0 = jnp.float32(1.0)
+
+    def f(x):
+        return _chol_scan_n(x, N)
+
+    # select=None: value is the outputs tuple
+    events_none: list[tap.TapEvent] = []
+    tap.verbose(
+        f,
+        on_step=lambda e: events_none.append(e) if "cholesky" in e.path else None,
+        taps=[tap.on("cholesky")],
+    )(x0)
+    jax.block_until_ready(None)
+
+    # Re-run cleanly to collect only chol events
+    events_none.clear()
+    all_events: list[tap.TapEvent] = []
+    got = tap.verbose(f, on_step=lambda e: all_events.append(e), taps=[tap.on("cholesky")])(x0)
+    jax.block_until_ready(got)
+
+    chol_none = [e for e in all_events if "cholesky" in e.path]
+    assert len(chol_none) == N, f"expected {N} cholesky events, got {len(chol_none)}"
+    for e in chol_none:
+        assert isinstance(e.value, tuple), f"select=None must give tuple, got {type(e.value)}"
+
+    # select reducing to bool scalar
+    all_events2: list[tap.TapEvent] = []
+    got2 = tap.verbose(
+        f,
+        on_step=lambda e: all_events2.append(e),
+        taps=[tap.on("cholesky", select=lambda outs: jnp.all(jnp.isfinite(outs[0])))],
+    )(x0)
+    jax.block_until_ready(got2)
+
+    chol_bool = [e for e in all_events2 if "cholesky" in e.path]
+    assert len(chol_bool) == N, f"expected {N} bool-select events, got {len(chol_bool)}"
+    for e in chol_bool:
+        assert (
+            np.asarray(e.value).ndim == 0
+        ), f"bool-scalar select must give 0-d value, got shape {np.asarray(e.value).shape}"
+
+
+def test_prim_tap_multiple_sites_same_level():
+    """
+    M1a: two calls to the same primitive at the same jaxpr level get distinct
+    indices: prim[0] and prim[1].  Uses sin (not jit-wrapped) for clarity.
+    """
+
+    def f(x):
+        def body(carry, _):
+            # sin appears directly in the scan body jaxpr (no jit wrapper)
+            a = jnp.sin(carry)  # sin[0] at scan[0]/ level
+            b = jnp.sin(carry)  # sin[1] at scan[0]/ level
+            return carry + a + b, a
+
+        return jax.lax.scan(body, x, None, length=3)
+
+    x = jnp.float32(1.0)
+    ref = f(x)
+    events: list[tap.TapEvent] = []
+    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("sin")])(x)
+    jax.block_until_ready(got)
+
+    sin_events = [e for e in events if "sin" in e.path]
+    paths = {e.path for e in sin_events}
+
+    assert any("sin[0]" in p for p in paths), f"sin[0] not in {sorted(paths)}"
+    assert any("sin[1]" in p for p in paths), f"sin[1] not in {sorted(paths)}"
+    # 3 steps × 2 sin sites = 6 events
+    assert len(sin_events) == 6, f"expected 6 events (3 steps × 2 sites), got {len(sin_events)}"
+    assert bitwise_eq(ref, got), "multiple-sites tap broke bitwise identity"
+
+
+def test_prim_tap_nested_scan_step():
+    """
+    M1a: primitive tap inside a nested scan gets the INNER loop's live step.
+    Path includes both outer and inner scan segments.
+    """
+    OUTER, INNER = 3, 4
+
+    def f(x):
+        def outer_body(c, _):
+            def inner_body(ic, __):
+                M = jnp.array([[1.0, 0.5], [0.5, 1.0]])
+                L = jnp.linalg.cholesky(M)
+                return ic + L[0, 0], L[0, 0]
+
+            ic_out, _ = jax.lax.scan(inner_body, c, None, length=INNER)
+            return ic_out, ic_out
+
+        return jax.lax.scan(outer_body, x, None, length=OUTER)
+
+    x = jnp.float32(0.0)
+    ref = f(x)
+    events: list[tap.TapEvent] = []
+    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(x)
+    jax.block_until_ready(got)
+
+    chol_events = [e for e in events if "cholesky" in e.path]
+    assert (
+        len(chol_events) == OUTER * INNER
+    ), f"expected {OUTER * INNER} cholesky events, got {len(chol_events)}"
+
+    # Steps should be inner loop steps 0..INNER-1, each occurring OUTER times
+    from collections import Counter
+
+    step_counts = Counter(e.step for e in chol_events)
+    for inner_step in range(INNER):
+        assert (
+            step_counts[inner_step] == OUTER
+        ), f"inner step {inner_step} should appear {OUTER} times, got {step_counts[inner_step]}"
+
+    assert bitwise_eq(ref, got), "nested scan prim tap broke bitwise identity"
+
+
+def test_prim_tap_grad_bitwise():
+    """
+    M1a: grad(verbose(f, taps=[...])) is bitwise-identical to grad(f).
+    Primitive taps must not perturb AD.
+    """
+    N = 4
+    x0 = jnp.float32(1.0)
+
+    def f(x):
+        return _chol_scan_n(x, N)
+
+    def loss(x):
+        _, ys = f(x)
+        return jnp.sum(ys)
+
+    ref_g = jax.grad(loss)(x0)
+    got_g = jax.grad(
+        lambda x: jnp.sum(tap.verbose(f, on_step=lambda e: None, taps=[tap.on("cholesky")])(x)[1])
+    )(x0)
+    jax.block_until_ready(got_g)
+
+    assert bitwise_eq(
+        ref_g, got_g
+    ), f"grad through prim-tap not bitwise identical: ref={float(ref_g):.6f} got={float(got_g):.6f}"
+
+
+def test_prim_tap_raising_on_step():
+    """
+    M1a: a raising on_step with taps active → results bitwise-correct, warn-once.
+    The _guard mechanism covers both loop-carry events and primitive tap events.
+    """
+    N = 3
+    x0 = jnp.float32(1.0)
+
+    def f(x):
+        return _chol_scan_n(x, N)
+
+    ref = f(x0)
+    call_count = [0]
+
+    def raising_cb(e: tap.TapEvent) -> None:
+        call_count[0] += 1
+        raise ValueError("boom from prim tap test")
+
+    tap._warned.discard(id(raising_cb))
+
+    with pytest.warns(UserWarning, match="jaxtap"):
+        got = tap.verbose(f, on_step=raising_cb, taps=[tap.on("cholesky")])(x0)
+        jax.block_until_ready(got)
+
+    assert bitwise_eq(ref, got), "result corrupted by raising callback in prim tap mode"
+    assert call_count[0] > 0, "callback was never attempted"
+
+
+def test_prim_tap_filtered_loop_silent():
+    """
+    M1a: when a loop is filtered by 'where', primitive taps inside it are
+    silent (the body is not descended).  Addressing of the other loop is stable.
+    """
+    N = 4
+
+    def f(x):
+        def body_with_chol(carry, _):
+            M = jnp.array([[1.0, 0.5], [0.5, 1.0]])
+            L = jnp.linalg.cholesky(M)
+            return carry + L[0, 0], L[0, 0]
+
+        def body_simple(carry, _):
+            return carry + 1.0, carry
+
+        # scan[0]: filtered out by where; cholesky inside it is silent
+        out1, _ = jax.lax.scan(body_with_chol, x, None, length=N)
+        # scan[1]: not filtered; carry taps fire
+        out2, _ = jax.lax.scan(body_simple, out1, None, length=N)
+        return out2
+
+    x = jnp.float32(0.0)
+    events: list[tap.TapEvent] = []
+    got = tap.verbose(
+        f,
+        on_step=lambda e: events.append(e),
+        taps=[tap.on("cholesky")],
+        where=lambda p: "scan[1]" in p,  # filter scan[0]
+    )(x)
+    jax.block_until_ready(got)
+
+    chol_events = [e for e in events if "cholesky" in e.path]
+    assert len(chol_events) == 0, (
+        f"expected 0 cholesky events (scan[0] filtered, body not descended), "
+        f"got {len(chol_events)}"
+    )
+
+    # scan[1] carry taps still fire
+    scan1_events = [e for e in events if "scan[1]" in e.path]
+    assert len(scan1_events) == N, f"expected {N} scan[1] carry events, got {len(scan1_events)}"
