@@ -126,9 +126,7 @@ def rewrite_while(
 
     def body_fn(carry_step):
         carry, step = carry_step
-        new_carry = interp_fn(
-            bj.jaxpr, bj.consts, [*bconsts, *carry], tap_cb, ops, here + "/"
-        )
+        new_carry = interp_fn(bj.jaxpr, bj.consts, [*bconsts, *carry], tap_cb, ops, here + "/")
         tap_cb(here, step, *new_carry)
         return (new_carry, step + 1)
 

@@ -22,8 +22,18 @@ Call-primitive dispatch
 v1 policy for ``custom_jvp_call`` / ``custom_vjp_call``: bind opaquely, do NOT
 recurse inside.  Inserting callbacks through AD boundaries can silently alter
 gradient semantics (same concern that deprecated ``host_callback`` raised).
-These primitives are bound via their original ``eqn.primitive.bind`` so autodiff
-correctness is fully preserved.
+These primitives (and all other primitives) are bound using the canonical
+``get_bind_params`` pattern from ``jax.core.eval_jaxpr``::
+
+    bind_params = eqn.primitive.get_bind_params(eqn.params)
+    eqn.primitive.bind(*invals, **bind_params)
+
+This is REQUIRED for ``custom_jvp_call`` / ``custom_vjp_call``: their params
+carry ``call_jaxpr`` / ``jvp_jaxpr_fun`` which ``get_bind_params`` converts
+into a ``subfuns`` keyword argument that ``bind`` expects.  Naively passing
+``**eqn.params`` raises ``KeyError: 'subfuns'``.  The ``get_bind_params``
+pattern preserves the custom JVP/VJP rule so ``jax.grad(verbose(f))``
+differentiates correctly through instrumented programs.
 
 v1 policy for ``jit`` / ``pjit`` / ``closed_call``: recurse into the inner jaxpr
 and re-wrap the interpreted sub-call in a fresh ``jax.jit`` so that the compile
@@ -126,7 +136,8 @@ def _interp(
 
             else:
                 # CF primitive not in ops: bind opaquely (still counted above).
-                outvals = eqn.primitive.bind(*invals, **eqn.params)
+                bind_params = eqn.primitive.get_bind_params(eqn.params)
+                outvals = eqn.primitive.bind(*invals, **bind_params)
                 if not eqn.primitive.multiple_results:
                     outvals = [outvals]
 
@@ -142,12 +153,20 @@ def _interp(
 
         elif prim_name in _AD_PRIMS:
             # Bind opaquely — do NOT recurse (see module docstring).
-            outvals = eqn.primitive.bind(*invals, **eqn.params)
+            # MUST use get_bind_params: custom_jvp_call/custom_vjp_call carry
+            # call_jaxpr + jvp_jaxpr_fun in params; get_bind_params converts
+            # them to the subfuns= kwarg that bind expects.  Direct **eqn.params
+            # raises KeyError: 'subfuns'.  This pattern also preserves the custom
+            # JVP/VJP rule so jax.grad(verbose(f)) differentiates correctly.
+            bind_params = eqn.primitive.get_bind_params(eqn.params)
+            outvals = eqn.primitive.bind(*invals, **bind_params)
             if not eqn.primitive.multiple_results:
                 outvals = [outvals]
 
         else:
-            outvals = eqn.primitive.bind(*invals, **eqn.params)
+            # Use the eval_jaxpr pattern for all remaining primitives.
+            bind_params = eqn.primitive.get_bind_params(eqn.params)
+            outvals = eqn.primitive.bind(*invals, **bind_params)
             if not eqn.primitive.multiple_results:
                 outvals = [outvals]
 

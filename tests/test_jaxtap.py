@@ -3,20 +3,20 @@ M0 invariant tests for jaxtap B-core walker.
 
 Ports every invariant from proofs/jaxtap_sketch.py and
 proofs/jaxtap_while_sketch.py, plus the M0-specific requirements.
+AYS round-1 regression tests (custom_jvp, vmap, grad) appended at the bottom.
 
 Run with: uv run pytest
 """
+
 from __future__ import annotations
 
 import warnings
 
 import jax
 import jax.numpy as jnp
+import jaxtap as tap
 import numpy as np
 import pytest
-
-import jaxtap as tap
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -441,3 +441,105 @@ def test_kwargs_rejected():
     tapped = tap.verbose(f, on_step=lambda e: None)
     with pytest.raises(TypeError):
         tapped(jnp.float32(1.0), k=1)
+
+
+# ---------------------------------------------------------------------------
+# AYS round-1 regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_custom_jvp_in_scan():
+    """
+    AYS-R1: jax.nn.softplus (and any @custom_jvp function) inside a scan body
+    must not crash.  Root cause: custom_jvp_call params carry call_jaxpr /
+    jvp_jaxpr_fun which get_bind_params converts to the subfuns= kwarg that
+    bind expects — naive **eqn.params raises KeyError: 'subfuns'.
+    """
+    N = 5
+    carry = jnp.float32(1.0)
+    xs = jnp.arange(float(N), dtype=jnp.float32)
+
+    def step(c, x):
+        return jax.nn.softplus(c + x), c
+
+    def scan_f(c, xs_):
+        return jax.lax.scan(step, c, xs_)
+
+    ref = scan_f(carry, xs)
+    got, events = _collect(scan_f, carry, xs)
+
+    assert bitwise_eq(ref, got), "custom_jvp-in-scan not bitwise identical"
+    scan_events = [e for e in events if e.path == "scan[0]"]
+    assert len(scan_events) == N, f"expected {N} scan events, got {len(scan_events)}"
+
+
+def test_vmap_safety():
+    """
+    AYS-R1: vmap(verbose(f)) must produce bitwise-identical outputs across all
+    lanes and emit N*lanes events.
+    """
+    N = 4
+    LANES = 3
+    xs_single = jnp.arange(float(N), dtype=jnp.float32)
+
+    def step(c, x):
+        return jax.nn.softplus(c + x), c
+
+    def scan_f(c, xs_):
+        return jax.lax.scan(step, c, xs_)
+
+    carry_batch = jnp.ones(LANES, dtype=jnp.float32)
+    xs_batch = jnp.tile(xs_single, (LANES, 1))
+
+    ref = jax.vmap(scan_f)(carry_batch, xs_batch)
+
+    events: list[tap.TapEvent] = []
+    got = jax.vmap(tap.verbose(scan_f, on_step=lambda e: events.append(e)))(carry_batch, xs_batch)
+    jax.block_until_ready(got)
+
+    assert bitwise_eq(ref, got), "vmap(verbose(f)) not bitwise identical"
+    # Under vmap with ordered=False each lane fires independently:
+    # total events = LANES * N.
+    assert len(events) == LANES * N, f"expected {LANES * N} events, got {len(events)}"
+
+
+def test_grad_through_transform():
+    """
+    AYS-R1: jax.grad(verbose(f)) must be bitwise identical to jax.grad(f),
+    both for plain programs and for programs containing @custom_jvp functions.
+    The get_bind_params fix must preserve the custom JVP rule so the gradient
+    is computed via the custom derivative, not by inlining the primal.
+    """
+    N = 5
+    carry0 = jnp.float32(1.0)
+    xs = jnp.arange(float(N), dtype=jnp.float32)
+
+    # --- plain loss (no custom_jvp) ---
+    def plain_loss(c):
+        _, ys = _simple_scan(c, xs)
+        return jnp.sum(ys)
+
+    ref_g_plain = jax.grad(plain_loss)(carry0)
+    got_g_plain = jax.grad(
+        lambda c: jnp.sum(tap.verbose(_simple_scan, on_step=lambda e: None)(c, xs)[1])
+    )(carry0)
+    jax.block_until_ready(got_g_plain)
+    assert bitwise_eq(ref_g_plain, got_g_plain), "grad through plain scan not bitwise identical"
+
+    # --- loss containing @custom_jvp (softplus) ---
+    def step(c, x):
+        return jax.nn.softplus(c + x), c
+
+    def scan_f(c, xs_):
+        return jax.lax.scan(step, c, xs_)
+
+    def custom_jvp_loss(c):
+        _, ys = scan_f(c, xs)
+        return jnp.sum(ys)
+
+    ref_g_cjvp = jax.grad(custom_jvp_loss)(carry0)
+    got_g_cjvp = jax.grad(lambda c: jnp.sum(tap.verbose(scan_f, on_step=lambda e: None)(c, xs)[1]))(
+        carry0
+    )
+    jax.block_until_ready(got_g_cjvp)
+    assert bitwise_eq(ref_g_cjvp, got_g_cjvp), "grad through custom_jvp scan not bitwise identical"

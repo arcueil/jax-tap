@@ -27,7 +27,7 @@ from typing import Any, Callable
 
 import jax
 
-from ._walker import TapCallback, interpret
+from ._walker import interpret
 
 __all__ = ["TapEvent", "verbose"]
 
@@ -41,8 +41,8 @@ __all__ = ["TapEvent", "verbose"]
 class TapEvent:
     """A single telemetry emission from inside a tapped control-flow operator."""
 
-    path: str   # stable address, e.g. "scan[0]/while[0]"
-    step: int   # iteration index (0-based)
+    path: str  # stable address, e.g. "scan[0]/while[0]"
+    step: int  # iteration index (0-based)
     value: Any  # selected carry payload delivered to the host
 
 
@@ -131,9 +131,7 @@ def verbose(
     is delivered to the host with its pytree structure preserved via trace-time
     treedef capture.
     """
-    internal_ops: frozenset[str] = frozenset(
-        _OP_NAME_MAP[op] for op in ops if op in _OP_NAME_MAP
-    )
+    internal_ops: frozenset[str] = frozenset(_OP_NAME_MAP[op] for op in ops if op in _OP_NAME_MAP)
 
     if select is not None:
         # tap_cb is called INSIDE the traced computation (scan/while body),
