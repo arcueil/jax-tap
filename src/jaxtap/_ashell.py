@@ -6,7 +6,7 @@ of the context, so that any call to those primitives inside the ``with`` block
 is automatically instrumented — zero change to user code.
 
 The patch machinery is ported from the hardened #964 patch in
-``blackjax/blackjax/progress_bar.py`` (tqdm / display-thread / output_file
+``reference-964/progress_bar.py`` (tqdm / display-thread / output_file
 stripped; jaxtap is emission-only).
 
 Thread safety
@@ -48,12 +48,29 @@ transition, we restore ONLY if ``jax.lax.scan is _patched_scan``; if a
 foreign patch was installed OVER us during our session, we leave it alone and
 warn once.
 
-jit-cache boundary (documented, not fixed)
--------------------------------------------
-A function JIT-compiled BEFORE entering the context reuses the cached trace
-on subsequent calls and emits nothing inside the context — no retrace means
-no new callbacks are baked in.  Workaround: ``jax.clear_caches()`` before
-entering the context.
+Dynamic host routing (jit-cache staleness fix)
+-----------------------------------------------
+When ``verbose(g, on_step=..., ...)`` is called, the ``on_step`` callable
+gets baked into the XLA compiled artifact via ``jax.debug.callback``.  If the
+baked ``on_step`` closes over a SPECIFIC recorder, that recorder is written to
+forever — even after ``__exit__`` (phantom emission), and even when the
+compiled artifact is reused inside a DIFFERENT context (wrong-recorder).
+
+Fix: the baked ``on_step`` is always ``_dynamic_router``, a module-level
+singleton that performs a RUNTIME lookup of ``_context_registry`` on each
+firing.  This ensures:
+  - After exit: no active context → event dropped (no phantom emission).
+  - Cache-hit in new context: new context's recorder receives the event.
+  - The device-side ``select`` / ``taps`` config IS baked at trace time
+    (device-side; cannot be changed dynamically) — document if a cache-hit
+    occurs in a context with a DIFFERENT ``select``, the trace-time select
+    wins for the device-side computation; only host routing is live.
+
+jit-cache boundary (third direction — documented, not fixed)
+-------------------------------------------------------------
+A function compiled BEFORE any context is entered has NO callback baked in.
+Subsequent calls inside a context produce 0 events (no retrace → no
+callbacks).  Workaround: ``jax.clear_caches()`` before entering the context.
 """
 
 from __future__ import annotations
@@ -142,6 +159,42 @@ def _select_ctx(active: list["_RecordContext"]) -> "_RecordContext | None":
 
 
 # ---------------------------------------------------------------------------
+# Dynamic router — the singleton on_step baked into every XLA artifact
+# ---------------------------------------------------------------------------
+
+
+def _dynamic_router(event: Any) -> None:
+    """Route a TapEvent to whichever context is active at CALL TIME.
+
+    This function (not a specific recorder) is what gets baked into XLA
+    compiled artifacts via ``jax.debug.callback``.  Because it performs a
+    runtime lookup of ``_context_registry``, it correctly handles:
+
+    - After-exit calls (phantom emission): no context active → event dropped.
+    - Cache-hit inside a new context: new context's recorder receives the event.
+
+    Both the FlightRecorder and the optional user ``on_step`` callback are
+    routed here, both ``_guard``-wrapped.
+
+    Limitation (document, not fix): if a cache-hit occurs in a context with a
+    DIFFERENT ``select`` or ``taps`` config than what was baked at trace time,
+    the trace-time device-side select wins for the on-device computation;
+    only the host routing is live.
+    """
+    active = list(_context_registry.values())
+    if not active:
+        return  # no active context → drop (covers post-exit phantom case)
+    ctx = _select_ctx(active)
+    if ctx is None or ctx._recorder is None:
+        return
+    from . import _guard  # lazy to avoid circular import at module load
+
+    _guard(ctx._recorder, event)
+    if ctx._extra_on_step is not None:
+        _guard(ctx._extra_on_step, event)
+
+
+# ---------------------------------------------------------------------------
 # Patched primitives
 # ---------------------------------------------------------------------------
 
@@ -200,6 +253,12 @@ class _RecordContext:
 
     See module docstring for thread-safety, re-entrant, foreign-patch, and
     jit-cache-boundary contract.
+
+    The host callback baked into compiled artifacts is always the module-level
+    singleton ``_dynamic_router``, not a closure over ``self._recorder``.
+    This means:
+      - After exit: events are dropped, not appended to the dead recorder.
+      - Cache-hit in a new context: events route to the new context's recorder.
     """
 
     def __init__(
@@ -211,6 +270,7 @@ class _RecordContext:
         where: "Callable[[str], bool] | None" = None,
         max_depth: "int | None" = None,
         taps: "Sequence[Any]" = (),
+        on_step: "Callable | None" = None,
     ) -> None:
         self._select = select
         self._ops = ops
@@ -218,6 +278,7 @@ class _RecordContext:
         self._where = where
         self._max_depth = max_depth
         self._taps = taps
+        self._extra_on_step = on_step  # optional live-stream callback
         self._recorder: "FlightRecorder | None" = None
         self._key: str | None = None
         self._owner_thread: int | None = None
@@ -261,9 +322,7 @@ class _RecordContext:
 
                 # scan restore
                 if jax.lax.scan is _patched_scan:
-                    jax.lax.scan = (
-                        _session_scan if _session_scan is not None else _original_scan
-                    )
+                    jax.lax.scan = _session_scan if _session_scan is not None else _original_scan
                 elif not _clobber_scan_warned:
                     # Foreign patch installed OVER us: leave it, warn once.
                     _clobber_scan_warned = True
@@ -309,9 +368,16 @@ class _RecordContext:
         """Apply the B-core verbose() transform to a scan call intercepted at depth 0.
 
         Builds a wrapper ``g`` that calls the underlying scan with the original
-        body and kwargs, then runs ``verbose(g, ...)`` on it.  The depth counter
-        (already incremented to 1 in ``_patched_scan``) prevents the B-core's
-        own ``jax.lax.scan`` calls from being re-intercepted.
+        body and kwargs, then runs ``verbose(g, on_step=_dynamic_router, ...)``
+        on it.
+
+        The ``on_step`` is always the module-level ``_dynamic_router`` singleton —
+        NOT ``self._recorder``.  This ensures the baked XLA callback resolves
+        the live active context at EXECUTION TIME, preventing phantom emission
+        and enabling correct routing on cache-hits in new contexts.
+
+        The depth counter (already incremented to 1 in ``_patched_scan``) prevents
+        the B-core's own ``jax.lax.scan`` calls from being re-intercepted.
         """
         from . import verbose as _verbose
 
@@ -322,7 +388,7 @@ class _RecordContext:
 
         return _verbose(
             g,
-            on_step=self._recorder,
+            on_step=_dynamic_router,
             select=self._select,
             ops=self._ops,
             sample_every=self._sample_every,
@@ -337,7 +403,11 @@ class _RecordContext:
         body_fun: Callable,
         init_val: Any,
     ) -> Any:
-        """Apply the B-core verbose() transform to a while_loop call intercepted at depth 0."""
+        """Apply the B-core verbose() transform to a while_loop call intercepted at depth 0.
+
+        Uses ``_dynamic_router`` as ``on_step`` for the same reason as
+        ``_intercept_scan`` — runtime context resolution, no phantom emission.
+        """
         from . import verbose as _verbose
 
         underlying = _underlying_while()
@@ -347,7 +417,7 @@ class _RecordContext:
 
         return _verbose(
             g,
-            on_step=self._recorder,
+            on_step=_dynamic_router,
             select=self._select,
             ops=self._ops,
             sample_every=self._sample_every,

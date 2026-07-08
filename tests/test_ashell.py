@@ -11,7 +11,6 @@ Run with: uv run pytest tests/test_ashell.py
 from __future__ import annotations
 
 import threading
-from collections import Counter
 
 import jax
 import jax.numpy as jnp
@@ -145,17 +144,15 @@ def test_ashell_no_double_instrumentation():
     vb_outer = len([e for e in events_verbose if e.path == "scan[0]"])
     vb_inner = len([e for e in events_verbose if e.path == "scan[0]/scan[0]"])
 
-    assert ctx_outer == vb_outer, (
-        f"outer event count mismatch: with-form={ctx_outer}, verbose={vb_outer}"
-    )
-    assert ctx_inner == vb_inner, (
-        f"inner event count mismatch: with-form={ctx_inner}, verbose={vb_inner}"
-    )
+    assert (
+        ctx_outer == vb_outer
+    ), f"outer event count mismatch: with-form={ctx_outer}, verbose={vb_outer}"
+    assert (
+        ctx_inner == vb_inner
+    ), f"inner event count mismatch: with-form={ctx_inner}, verbose={vb_inner}"
     # Concrete values for the report
     assert ctx_outer == N_OUTER, f"outer expected {N_OUTER}, got {ctx_outer}"
-    assert ctx_inner == N_OUTER * INNER_N, (
-        f"inner expected {N_OUTER * INNER_N}, got {ctx_inner}"
-    )
+    assert ctx_inner == N_OUTER * INNER_N, f"inner expected {N_OUTER * INNER_N}, got {ctx_inner}"
 
 
 # ---------------------------------------------------------------------------
@@ -182,9 +179,9 @@ def test_ashell_while_loop():
     jax.block_until_ready(got)
     assert bitwise_eq(ref, got), "while_loop A-shell not bitwise identical"
     while_events = [e for e in rec.events if e.path == "while[0]"]
-    assert len(while_events) == expected_iters, (
-        f"expected {expected_iters} while events, got {len(while_events)}"
-    )
+    assert (
+        len(while_events) == expected_iters
+    ), f"expected {expected_iters} while events, got {len(while_events)}"
 
 
 # ---------------------------------------------------------------------------
@@ -291,9 +288,9 @@ def test_ashell_foreign_patch_chain():
         jax.block_until_ready(got)
 
         # After context: restored to foreign patch (not original)
-        assert jax.lax.scan is _foreign_scan, (
-            "lax.scan should be restored to foreign patch, not original"
-        )
+        assert (
+            jax.lax.scan is _foreign_scan
+        ), "lax.scan should be restored to foreign patch, not original"
         # Events collected
         assert len(rec.events) > 0, "expected scan events"
         # Result correct
@@ -309,7 +306,7 @@ def test_ashell_foreign_patch_chain():
 
 def test_ashell_foreign_patch_over_us():
     """Foreign patch installed while context is active: our exit leaves it alone."""
-    from jaxtap._ashell import _original_scan, _patched_scan
+    from jaxtap._ashell import _original_scan
 
     clobber_calls: list[str] = []
 
@@ -319,10 +316,8 @@ def test_ashell_foreign_patch_over_us():
 
     # Reset warn-once flag from prior test runs so we can observe the warning
     import jaxtap._ashell as _ashell_mod
-    _ashell_mod._clobber_scan_warned = False
 
-    x0 = jnp.float32(1.0)
-    xs = jnp.arange(3.0, dtype=jnp.float32)
+    _ashell_mod._clobber_scan_warned = False
 
     with pytest.warns(UserWarning, match="jaxtap"):
         with tap.record() as _:
@@ -330,9 +325,9 @@ def test_ashell_foreign_patch_over_us():
             jax.lax.scan = _clobber_scan
         # __exit__ should see that jax.lax.scan is NOT _patched_scan → warn + leave alone
 
-    assert jax.lax.scan is _clobber_scan, (
-        "exit should NOT have clobbered the foreign patch installed over us"
-    )
+    assert (
+        jax.lax.scan is _clobber_scan
+    ), "exit should NOT have clobbered the foreign patch installed over us"
     # Cleanup
     jax.lax.scan = _original_scan
     # Reset warn flag for subsequent tests
@@ -391,13 +386,13 @@ def test_ashell_reentrant_contexts():
     jax.block_until_ready(None)
 
     # Inner context collected the scan that ran while it was active
-    assert len(rec_inner.events) == len(xs_inner), (
-        f"inner expected {len(xs_inner)} events, got {len(rec_inner.events)}"
-    )
+    assert len(rec_inner.events) == len(
+        xs_inner
+    ), f"inner expected {len(xs_inner)} events, got {len(rec_inner.events)}"
     # Outer collected the scans that ran before and after the inner context
-    assert len(rec_outer.events) == 2 * len(xs_outer), (
-        f"outer expected {2 * len(xs_outer)} events, got {len(rec_outer.events)}"
-    )
+    assert len(rec_outer.events) == 2 * len(
+        xs_outer
+    ), f"outer expected {2 * len(xs_outer)} events, got {len(rec_outer.events)}"
 
 
 # ---------------------------------------------------------------------------
@@ -432,10 +427,172 @@ def test_ashell_thread_delegation():
     assert t.is_alive() is False, "worker thread did not finish"
     assert worker_result[0] is not None, "worker did not produce a result"
     assert bitwise_eq(ref, worker_result[0]), "worker result not bitwise identical"
-    assert len(rec.events) > 0, (
-        "expected events attributed from worker thread to single active context"
-    )
+    assert (
+        len(rec.events) > 0
+    ), "expected events attributed from worker thread to single active context"
     scan_events = [e for e in rec.events if e.path == "scan[0]"]
-    assert len(scan_events) == len(xs), (
-        f"expected {len(xs)} scan events from worker, got {len(scan_events)}"
-    )
+    assert len(scan_events) == len(
+        xs
+    ), f"expected {len(xs)} scan events from worker, got {len(scan_events)}"
+
+
+# ---------------------------------------------------------------------------
+# 13. Phantom emission regression (AYS R1 probe 2)
+# ---------------------------------------------------------------------------
+
+
+def test_ashell_no_phantom_after_exit():
+    """Callbacks baked into a jitted artifact must NOT append to the recorder after exit.
+
+    Root cause (fixed): the baked on_step used to close over self._recorder.
+    After __exit__, the compiled XLA artifact still fired → phantom emission.
+    Fix: _dynamic_router is baked instead; it drops events when no context active.
+    """
+    N = 5
+    xs_local = jnp.arange(float(N), dtype=jnp.float32)
+
+    def _fresh_fn(x0):
+        return jax.lax.scan(lambda c, x: (c * 1.01 + jnp.sin(x), c), x0, xs_local)
+
+    fj = jax.jit(_fresh_fn)
+
+    with tap.record() as rec:
+        r_in = fj(jnp.float32(0.5))
+        jax.block_until_ready(r_in)
+
+    n_inside = len(rec.events)
+    assert n_inside > 0, "expected events collected during context"
+
+    # Call the same compiled artifact AFTER exit — must produce 0 new events
+    r_out = fj(jnp.float32(0.5))
+    jax.block_until_ready(r_out)
+    n_after = len(rec.events)
+
+    assert (
+        n_after == n_inside
+    ), f"phantom emission: events grew from {n_inside} to {n_after} after context exit"
+    assert bitwise_eq(r_in, r_out), "jit call after exit not bitwise identical"
+
+
+# ---------------------------------------------------------------------------
+# 14. Cache-hit inside new context routes to the new recorder (AYS R1 probe 3)
+# ---------------------------------------------------------------------------
+
+
+def test_ashell_cache_hit_new_context():
+    """A jit cache-hit inside a NEW context routes events to the NEW recorder.
+
+    Root cause (fixed): baked on_step closed over the FIRST context's recorder.
+    A cache-hit in a second context would append to the first (now-dead) recorder;
+    the second recorder saw 0 events.
+    Fix: _dynamic_router is baked; it resolves the active context at call time.
+    """
+    N = 5
+    xs_local = jnp.arange(float(N), dtype=jnp.float32)
+
+    def _fresh_fn2(x0):
+        return jax.lax.scan(lambda c, x: (c * 1.01 + jnp.sin(x), c), x0, xs_local)
+
+    fj2 = jax.jit(_fresh_fn2)
+    ref = _fresh_fn2(jnp.float32(0.5))
+
+    # Context A: bake the compiled artifact with dynamic router
+    with tap.record() as rec_a:
+        r_a = fj2(jnp.float32(0.5))
+        jax.block_until_ready(r_a)
+
+    assert len(rec_a.events) > 0, "expected events in context A"
+
+    # Context B: cache-hit on the same compiled artifact → must route to rec_b
+    with tap.record() as rec_b:
+        r_b = fj2(jnp.float32(0.5))
+        jax.block_until_ready(r_b)
+
+    n_b = len(rec_b.events)
+    assert n_b == len(
+        rec_a.events
+    ), f"cache-hit in new context: expected {len(rec_a.events)} events in rec_b, got {n_b}"
+    assert bitwise_eq(ref, r_b), "cache-hit result not bitwise identical"
+    # rec_a must not grow (no phantom into dead recorder)
+    assert len(rec_a.events) == len(rec_a.events), "rec_a grew after its context exited"
+
+
+# ---------------------------------------------------------------------------
+# 15. on_step passthrough — A-form
+# ---------------------------------------------------------------------------
+
+
+def test_ashell_on_step_aform():
+    """A-form on_step: live callback fires alongside the recorder."""
+    N = 6
+    x0 = jnp.float32(1.0)
+    xs = jnp.arange(float(N), dtype=jnp.float32)
+    ref = _simple_scan(x0, xs)
+
+    live_events: list[tap.TapEvent] = []
+
+    with tap.record(on_step=lambda e: live_events.append(e)) as rec:
+        got = _simple_scan(x0, xs)
+
+    jax.block_until_ready(got)
+
+    assert bitwise_eq(ref, got), "on_step passthrough broke bitwise identity"
+    assert len(rec.events) == N, f"recorder expected {N} events, got {len(rec.events)}"
+    assert len(live_events) == N, f"live callback expected {N} events, got {len(live_events)}"
+    # Both should have seen the same events (same steps, same paths)
+    assert [e.step for e in rec.events] == [e.step for e in live_events]
+
+
+# ---------------------------------------------------------------------------
+# 16. Raising on_step does not corrupt results or the recorder
+# ---------------------------------------------------------------------------
+
+
+def test_ashell_raising_on_step_aform():
+    """A-form: raising on_step does not corrupt results; recorder still collects."""
+
+    N = 5
+    x0 = jnp.float32(0.0)
+    xs = jnp.arange(float(N), dtype=jnp.float32)
+    ref = _simple_scan(x0, xs)
+
+    call_count = [0]
+
+    def raising_cb(e: tap.TapEvent) -> None:
+        call_count[0] += 1
+        raise ValueError("boom")
+
+    # Reset warn-once state
+    tap._warned.discard(id(raising_cb))
+
+    with pytest.warns(UserWarning, match="jaxtap"):
+        with tap.record(on_step=raising_cb) as rec:
+            got = _simple_scan(x0, xs)
+            jax.block_until_ready(got)
+
+    assert bitwise_eq(ref, got), "result corrupted by raising on_step in A-form"
+    assert len(rec.events) == N, f"recorder expected {N} events, got {len(rec.events)}"
+    assert call_count[0] == N, "raising callback was not attempted every step"
+
+
+# ---------------------------------------------------------------------------
+# 17. on_step passthrough — B-form
+# ---------------------------------------------------------------------------
+
+
+def test_ashell_on_step_bform():
+    """B-form on_step: live callback fires alongside the recorder for record(f)."""
+    N = 4
+    x0 = jnp.float32(1.0)
+    xs = jnp.arange(float(N), dtype=jnp.float32)
+    ref = _simple_scan(x0, xs)
+
+    live_events: list[tap.TapEvent] = []
+
+    g, rec = tap.record(_simple_scan, on_step=lambda e: live_events.append(e))
+    got = g(x0, xs)
+    jax.block_until_ready(got)
+
+    assert bitwise_eq(ref, got), "B-form on_step broke bitwise identity"
+    assert len(rec.events) == N, f"recorder expected {N} events, got {len(rec.events)}"
+    assert len(live_events) == N, f"live callback expected {N} events, got {len(live_events)}"

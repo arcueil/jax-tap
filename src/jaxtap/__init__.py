@@ -337,6 +337,7 @@ def record(
     where: "Callable[[str], bool] | None" = None,
     max_depth: "int | None" = None,
     taps: "Sequence[PrimitiveTap]" = (),
+    on_step: "Callable[[TapEvent], None] | None" = None,
 ) -> "tuple[Callable, FlightRecorder] | _RecordContext":
     """
     Dual-form recorder for zero-code-change telemetry.
@@ -347,6 +348,10 @@ def record(
         g, rec = tap.record(f)
         g(*args)
         rec.df()
+
+        # With live-streaming callback:
+        g, rec = tap.record(f, on_step=announce)
+        g(*args)   # announce() AND rec both receive every TapEvent
 
     **A-form** (no callable): return a context manager that monkeypatches
     ``jax.lax.scan`` / ``jax.lax.while_loop`` for the duration of the block,
@@ -359,19 +364,44 @@ def record(
 
         # Delete the ``with`` line → nothing was ever there.
 
-    All keyword arguments are identical in both forms and are forwarded to
-    :func:`verbose`.
+        # With live-streaming callback:
+        with tap.record(on_step=announce) as rec:
+            result = anything(...)  # announce() fires live; rec collects all
+
+    All keyword arguments except ``on_step`` are identical in both forms and
+    are forwarded to :func:`verbose`.
+
+    Parameters
+    ----------
+    on_step:
+        Optional additional host callback.  When given, every :class:`TapEvent`
+        is delivered to BOTH the :class:`FlightRecorder` (``rec``) AND
+        ``on_step``, in that order, both ``_guard``-wrapped (never-raise).
+        For the A-form this callback is dynamically resolved at event-fire time
+        (see ``_dynamic_router``), so it respects the same post-exit and
+        cache-hit routing as the recorder itself.
 
     A-form notes
     ------------
-    Functions already JIT-compiled BEFORE entering the context will reuse the
-    cached trace and emit nothing inside it (no retrace → no new callbacks).
-    Workaround: ``jax.clear_caches()`` before entering.
+    The host callback baked into JIT-compiled artifacts is always the
+    module-level ``_dynamic_router`` singleton.  This means:
 
-    With exactly ONE context active, any calling thread's scan/while is
-    attributed to it (thread delegation — enter on main, run on worker).
-    With >=2 simultaneous contexts, only the context whose owner thread matches
-    the calling thread receives events; bystanders pass through untapped.
+    - **Phantom emission prevented**: after ``__exit__`` events are dropped,
+      not appended to the closed recorder.
+    - **Cache-hit routing**: if the same jitted function is called inside a
+      NEW context, events route to the new context's recorder — even though
+      the compiled artifact was baked inside a prior context.
+    - **Trace-time config**: ``select`` and ``taps`` are baked at trace time
+      (device-side).  On a cache-hit in a new context with different
+      ``select``/``taps``, the trace-time config applies; only host routing
+      is live.  Document this to users when mixing configs across contexts.
+    - **Pre-context compilation**: functions compiled BEFORE any context was
+      entered have no callback baked in → 0 events inside a context.
+      Workaround: ``jax.clear_caches()`` before entering.
+
+    Thread delegation: with ONE context active, any calling thread's scan/while
+    is attributed to it.  With >=2 simultaneous contexts, only the context
+    whose owner thread matches receives events; bystanders pass through.
     """
     if f is None:
         from ._ashell import _RecordContext as _RC
@@ -383,14 +413,28 @@ def record(
             where=where,
             max_depth=max_depth,
             taps=taps,
+            on_step=on_step,
         )
 
     from .collectors import FlightRecorder as _FlightRecorder
 
     recorder = _FlightRecorder()
+
+    if on_step is not None:
+        # Combine recorder + user callback into a single on_step for verbose().
+        _user_cb = on_step
+
+        def _combined(event: TapEvent) -> None:
+            _guard(recorder, event)
+            _guard(_user_cb, event)
+
+        effective_on_step: Callable[[TapEvent], None] = _combined
+    else:
+        effective_on_step = recorder  # type: ignore[assignment]
+
     tapped = verbose(
         f,
-        on_step=recorder,
+        on_step=effective_on_step,
         select=select,
         ops=ops,
         sample_every=sample_every,
