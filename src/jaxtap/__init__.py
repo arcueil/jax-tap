@@ -17,19 +17,35 @@ The ``select`` parameter runs inside the traced program (on-device) to reduce
 what crosses the host boundary::
 
     tap.verbose(f, on_step=cb, select=lambda carry: carry[0].mean())
+
+Ergonomic collector helper::
+
+    g, rec = tap.record(f)
+    g(*args)
+    rec.df()
 """
 
 from __future__ import annotations
 
 import dataclasses
 import warnings
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import jax
 
 from ._walker import interpret
 
-__all__ = ["TapEvent", "verbose"]
+if TYPE_CHECKING:
+    from .collectors import FlightRecorder
+
+__all__ = [
+    "TapEvent",
+    "verbose",
+    "record",
+    "FlightRecorder",
+    "JSONLWriter",
+    "read_jsonl",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +106,9 @@ def verbose(
     on_step: Callable[[TapEvent], None],
     select: Callable | None = None,
     ops: tuple[str, ...] = ("scan", "while_loop"),
+    sample_every: int = 1,
+    where: "Callable[[str], bool] | None" = None,
+    max_depth: "int | None" = None,
 ) -> Callable:
     """
     Return a function bitwise-identical to ``f`` that emits telemetry from
@@ -110,6 +129,17 @@ def verbose(
     ops:
         Which control-flow operators to tap.  Accepted values: ``"scan"``,
         ``"while_loop"``.  Default: both.
+    sample_every:
+        Fire taps only on steps 0, k, 2k, … (device-side gate via
+        ``lax.cond``).  Default: 1 (every step).  Must be ≥ 1.
+    where:
+        Optional path predicate: only CF nodes whose path satisfies
+        ``where(path)`` are instrumented.  The address counter advances for
+        filtered-out nodes so addressing remains stable.  Default: all nodes.
+    max_depth:
+        Optional depth limit.  CF nodes at depth > ``max_depth`` (depth =
+        number of ``/`` segments in the path) are bound opaquely.
+        Default: no limit.
 
     Returns
     -------
@@ -131,12 +161,15 @@ def verbose(
     is delivered to the host with its pytree structure preserved via trace-time
     treedef capture.
     """
+    if sample_every < 1:
+        raise ValueError(f"sample_every must be >= 1, got {sample_every}")
+
     internal_ops: frozenset[str] = frozenset(_OP_NAME_MAP[op] for op in ops if op in _OP_NAME_MAP)
 
     if select is not None:
         # tap_cb is called INSIDE the traced computation (scan/while body),
         # so ``select`` runs on-device before the host-boundary crossing.
-        def tap_cb(path: str, step: Any, *carry_leaves: Any) -> None:
+        def _base_tap_cb(path: str, step: Any, *carry_leaves: Any) -> None:
             selected = select(carry_leaves)
             flat_selected = jax.tree_util.tree_leaves(selected)
             # Capture pytree structure at Python (trace) time for host-side recon.
@@ -152,15 +185,81 @@ def verbose(
         # tap_cb is called INSIDE the traced computation; ``jax.debug.callback``
         # ships the carry leaves to the host.  ``path`` is a static Python string
         # captured in the closure.
-        def tap_cb(path: str, step: Any, *carry_leaves: Any) -> None:  # type: ignore[misc]
+        def _base_tap_cb(path: str, step: Any, *carry_leaves: Any) -> None:  # type: ignore[misc]
             def _host(step_: Any, *leaves: Any) -> None:
                 _guard(on_step, TapEvent(path=path, step=int(step_), value=leaves))
 
             jax.debug.callback(_host, step, *carry_leaves, ordered=False)
 
+    # Wrap with sample_every gate (device-side lax.cond) when k > 1.
+    # Both branches return None (empty pytree) so lax.cond type-checks;
+    # JAX's effects system ensures the debug callback fires only in the true branch.
+    if sample_every > 1:
+        _uncapped = _base_tap_cb
+
+        def tap_cb(path: str, step: Any, *carry_leaves: Any) -> None:
+            jax.lax.cond(
+                step % sample_every == 0,
+                lambda _: _uncapped(path, step, *carry_leaves),
+                lambda _: None,
+                step,
+            )
+
+    else:
+        tap_cb = _base_tap_cb
+
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         if kwargs:
             raise TypeError("jaxtap.verbose does not support keyword arguments to f")
-        return interpret(f, args, tap_cb, internal_ops)
+        return interpret(f, args, tap_cb, internal_ops, where=where, max_depth=max_depth)
 
     return wrapped
+
+
+def record(
+    f: Callable,
+    *,
+    select: "Callable | None" = None,
+    ops: "tuple[str, ...]" = ("scan", "while_loop"),
+    sample_every: int = 1,
+    where: "Callable[[str], bool] | None" = None,
+    max_depth: "int | None" = None,
+) -> "tuple[Callable, FlightRecorder]":
+    """
+    Wire a :class:`FlightRecorder` to ``verbose(f, ...)`` and return the pair.
+
+    Usage::
+
+        g, rec = tap.record(f)
+        g(*args)
+        rec.df()
+
+    All keyword arguments are forwarded to :func:`verbose`.
+    """
+    from .collectors import FlightRecorder as _FlightRecorder
+
+    recorder = _FlightRecorder()
+    tapped = verbose(
+        f,
+        on_step=recorder,
+        select=select,
+        ops=ops,
+        sample_every=sample_every,
+        where=where,
+        max_depth=max_depth,
+    )
+    return tapped, recorder
+
+
+# ---------------------------------------------------------------------------
+# Re-export collectors for convenience
+# ---------------------------------------------------------------------------
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy re-export of collectors to avoid circular imports at module load."""
+    if name in ("FlightRecorder", "JSONLWriter", "read_jsonl"):
+        from . import collectors as _collectors
+
+        return getattr(_collectors, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
