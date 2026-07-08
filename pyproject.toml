@@ -19,6 +19,9 @@ Repository = "https://github.com/arcueil/jax-tap"
 [tool.hatch.build.targets.wheel]
 packages = ["src/jaxtap"]
 
+[project.optional-dependencies]
+pandas = ["pandas"]
+
 [dependency-groups]
 dev = ["pytest", "ruff"]
 
