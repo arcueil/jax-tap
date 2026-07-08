@@ -629,3 +629,238 @@ def test_custom_vjp_through_transform():
     assert (
         float(got_g) == 343.0
     ), f"sentinel VJP chain rule broken: expected 343.0 (7^3), got {float(got_g)}"
+
+
+# ---------------------------------------------------------------------------
+# Remediation regression tests (M3 — fixes F1 and F2)
+# ---------------------------------------------------------------------------
+
+# These turn the bcore-review/arm-b attack scripts into passing tests.
+# See: proofs/bcore-review/arm-b/attack_cond.py, attack_misc.py,
+#      attack_jit_addressing.py
+
+
+def test_scan_in_cond_f1():
+    """
+    F1 regression: a scan nested inside lax.cond must emit events.
+    Before the fix, the cond branch was bound opaquely → 0 taps for in-cond scan.
+    After fix: scan inside the taken branch fires; path is cond[0]/b{j}/scan[0].
+    """
+    N = 5
+    xs = jnp.arange(float(N), dtype=jnp.float32)
+    x0 = jnp.float32(1.0)
+
+    def f_cond(pred, x0_):
+        def true_branch(c):
+            out, _ = jax.lax.scan(lambda a, b: (a + b, a), c, xs)
+            return out
+
+        def false_branch(c):
+            return c * 2.0
+
+        return jax.lax.cond(pred, true_branch, false_branch, x0_)
+
+    # True branch taken — scan inside cond must fire
+    pred = jnp.bool_(True)
+    ref = f_cond(pred, x0)
+    got, events = _collect(f_cond, pred, x0)
+    jax.block_until_ready(got)
+
+    assert bitwise_eq(ref, got), "cond result not bitwise identical"
+    # True branch is branch index 1 (false=0, true=1 in jaxpr branch order)
+    scan_events = [e for e in events if "scan" in e.path]
+    assert (
+        len(scan_events) == N
+    ), f"expected {N} events from scan inside cond true branch, got {len(scan_events)}"
+    # Path must include the cond boundary and the branch index
+    paths = {e.path for e in scan_events}
+    assert any(
+        "cond[0]" in p and "b1" in p for p in paths
+    ), f"expected cond[0]/b1/... path, got {sorted(paths)}"
+
+    # False branch taken — no scan in false branch → 0 events
+    pred_false = jnp.bool_(False)
+    ref_f = f_cond(pred_false, x0)
+    got_f, events_f = _collect(f_cond, pred_false, x0)
+    jax.block_until_ready(got_f)
+    assert bitwise_eq(ref_f, got_f), "cond false-branch result not bitwise identical"
+    assert len(events_f) == 0, f"false branch (no scan) should emit 0 events, got {len(events_f)}"
+
+
+def test_scan_in_switch_f1():
+    """
+    F1 regression: scans nested inside lax.switch branches must emit events.
+    All branches are instrumented at trace time; only the taken branch fires
+    at runtime.  Path format: cond[k]/b{j}/scan[m].
+    """
+    N = 5
+    xs = jnp.arange(float(N), dtype=jnp.float32)
+    x0 = jnp.float32(1.0)
+
+    def f_switch(i, x0_):
+        def make_branch(mult):
+            def branch(c):
+                out, _ = jax.lax.scan(lambda a, b: (a + b * mult, a), c, xs)
+                return out
+
+            return branch
+
+        return jax.lax.switch(i, [make_branch(1.0), make_branch(2.0), make_branch(3.0)], x0_)
+
+    for branch_idx in range(3):
+        i = jnp.int32(branch_idx)
+        ref = f_switch(i, x0)
+        got, events = _collect(f_switch, i, x0)
+        jax.block_until_ready(got)
+
+        assert bitwise_eq(ref, got), f"switch branch {branch_idx} result not bitwise identical"
+        scan_events = [e for e in events if "scan" in e.path]
+        assert (
+            len(scan_events) == N
+        ), f"branch {branch_idx}: expected {N} events, got {len(scan_events)}"
+        paths = {e.path for e in scan_events}
+        expected_branch_marker = f"b{branch_idx}"
+        assert any(
+            expected_branch_marker in p for p in paths
+        ), f"branch {branch_idx}: expected b{branch_idx} in path, got {sorted(paths)}"
+
+
+def test_scan_in_checkpoint_f1():
+    """
+    F1 regression: a scan inside jax.checkpoint (remat2) must emit events.
+    Before the fix, remat2 was bound opaquely → 0 taps for in-checkpoint scan.
+    After fix: scan inside checkpoint fires; path is remat[k]/scan[m].
+    """
+    N = 4
+    xs = jnp.arange(float(N), dtype=jnp.float32)
+    x0 = jnp.float32(0.0)
+
+    def f_remat(x0_):
+        @jax.checkpoint
+        def inner(c0):
+            out, _ = jax.lax.scan(lambda c, x: (c + x, c), c0, xs)
+            return out
+
+        return inner(x0_)
+
+    ref = f_remat(x0)
+    got, events = _collect(f_remat, x0)
+    jax.block_until_ready(got)
+
+    assert bitwise_eq(ref, got), "checkpoint result not bitwise identical"
+    scan_events = [e for e in events if "scan" in e.path]
+    assert (
+        len(scan_events) == N
+    ), f"expected {N} events from scan inside checkpoint, got {len(scan_events)}"
+    paths = {e.path for e in scan_events}
+    assert any("remat[0]" in p for p in paths), f"expected remat[0]/... path, got {sorted(paths)}"
+
+
+def test_checkpoint_grad_bitwise():
+    """
+    F1 remediation: jax.grad through a verbose-wrapped checkpoint must be
+    bitwise identical to jax.grad through the uninstrumented version.
+    This verifies that jax.checkpoint's prevent_cse and policy are preserved.
+    """
+    N = 4
+    xs = jnp.arange(float(N), dtype=jnp.float32)
+
+    def f_remat(x0_):
+        @jax.checkpoint
+        def inner(c0):
+            out, _ = jax.lax.scan(lambda c, x: (jnp.sin(c) + x, c), c0, xs)
+            return out
+
+        return inner(x0_)
+
+    theta = jnp.float32(0.5)
+    ref_grad = jax.grad(f_remat)(theta)
+    got_grad = jax.grad(tap.verbose(f_remat, on_step=lambda e: None))(theta)
+    jax.block_until_ready(got_grad)
+    assert bitwise_eq(
+        ref_grad, got_grad
+    ), f"grad through checkpoint not bitwise identical: ref={float(ref_grad):.6f} got={float(got_grad):.6f}"
+
+
+def test_jit_addressing_uniqueness_f2():
+    """
+    F2 regression: a top-level scan and a jit-nested scan must get DISTINCT paths.
+    Before the fix, both resolved to 'scan[0]' (address collision).
+    After fix: 'scan[0]' vs 'jit[1]/scan[0]'.
+    """
+    N = 4
+    xs = jnp.arange(float(N), dtype=jnp.float32)
+    x0 = jnp.float32(1.0)
+
+    def f(x0_, xs_):
+        # scan is the 0th boundary at top level → scan[0]
+        a, _ = jax.lax.scan(lambda c, x: (c + x, c), x0_, xs_)
+
+        # jit is the 1st boundary at top level → jit[1]
+        # scan inside jit is the 0th at that level → jit[1]/scan[0]
+        @jax.jit
+        def inner(c):
+            b, _ = jax.lax.scan(lambda cc, x: (cc * 1.0 + x, cc), c, xs_)
+            return b
+
+        return a + inner(x0_)
+
+    ref = f(x0, xs)
+    got, events = _collect(f, x0, xs)
+    jax.block_until_ready(got)
+
+    assert bitwise_eq(ref, got), "jit-addressing result not bitwise identical"
+
+    from collections import Counter
+
+    path_counts = Counter(e.path for e in events)
+    distinct_paths = set(path_counts.keys())
+
+    # Must have exactly 2 distinct paths, not 1 (collision would merge them)
+    assert (
+        len(distinct_paths) == 2
+    ), f"expected 2 distinct paths (top-level + jit-nested), got {sorted(distinct_paths)}"
+    assert "scan[0]" in distinct_paths, f"top-level scan[0] path missing: {sorted(distinct_paths)}"
+    assert any(
+        "jit" in p for p in distinct_paths
+    ), f"jit-nested path missing: {sorted(distinct_paths)}"
+    # Each scan runs N steps
+    for p, count in path_counts.items():
+        assert count == N, f"path {p!r}: expected {N} events, got {count}"
+
+
+def test_jit_boundary_path_format():
+    """
+    Check the boundary-visible path format for verbose(jit(f)):
+    outer scan → 'jit[0]/scan[0]', inner scan → 'jit[0]/scan[0]/scan[0]'.
+    Event count must match the non-jit-wrapped case.
+    """
+    x0 = jnp.float32(0.5)
+    xs = jnp.linspace(0.0, 1.0, 4, dtype=jnp.float32)
+
+    # verbose(jit(f)) — jit boundary is visible
+    got1, events1 = _collect(jax.jit(_nested_scan), x0, xs)
+    jax.block_until_ready(got1)
+
+    # direct verbose(f) — no jit boundary
+    got2, events2 = _collect(_nested_scan, x0, xs)
+    jax.block_until_ready(got2)
+
+    assert bitwise_eq(got1, got2), "verbose(jit(f)) != verbose(f) (not bitwise identical)"
+
+    # Event counts must match
+    assert len(events1) == len(
+        events2
+    ), f"event counts differ: verbose(jit(f))={len(events1)} vs verbose(f)={len(events2)}"
+
+    paths1 = {e.path for e in events1}
+    # Paths with jit boundary
+    assert "jit[0]/scan[0]" in paths1, f"expected jit[0]/scan[0] path, got {sorted(paths1)}"
+    assert (
+        "jit[0]/scan[0]/scan[0]" in paths1
+    ), f"expected jit[0]/scan[0]/scan[0] path, got {sorted(paths1)}"
+
+    paths2 = {e.path for e in events2}
+    # Paths without jit boundary
+    assert "scan[0]" in paths2
+    assert "scan[0]/scan[0]" in paths2
