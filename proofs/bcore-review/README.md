@@ -23,7 +23,37 @@ the instrumentation CONTRACT, not the numerics.
 Env note (arm A): JAX is **0.10.2** (not 0.10.1); scan params still carry no
 `linear`/`_split_transpose`, so `rewrite_scan` param-forwarding remains safe.
 
-## Arm B (jaxpr structure) — pending
+## Arm B (jaxpr structure) — VERDICT: no BLOCKER, 2 MAJOR structural bugs
+
+Headline: numerics bitwise-correct everywhere; 2 MAJOR instrumentation bugs,
+both CONFIRMED in clean M0 (TL re-ran in an isolated worktree).
+
+| # | Finding | TL 2×AYS verdict |
+|---|---------|------------------|
+| F1 | instrumentation silently dropped inside `cond`/`switch`/`remat2` (walker's `else` binds opaquely, never recurses) | **CONFIRMED real bug.** scan-in-cond/switch → 0 events (top-level → 5). Subsumes arm A's A2. Undocumented, large blast radius. Remediate. |
+| F2 | jit boundary collapses addressing → non-unique paths (jit branch keeps path + `_interp` resets `n_cf=0`) | **CONFIRMED real bug.** top-level + jit-nested scan both `scan[0]`, 8 events merged. Mislabels; also corrupts M2 `where=`/`max_depth=` across jit. Remediate. |
+| jit/pjit param-drop | re-wrap forwards only the sub-jaxpr | CPU correctness-neutral (arm B retracted its own "Array deleted" false positive); THEORETIC multi-device sharding only. Document. |
+| — MINOR | re-wrap name `_inner_call` lost from profiles; non-array output → TypedInt | inherent to make_jaxpr interpreters. |
+
+CLEAN (bounds remediation): effects/ordered callbacks, io_callback(ordered), 7
+carry/pytree edges, intra-jaxpr nesting, **M2 sample_every×vmap gate holds**.
+
+### Unified remediation invariant (arm B closing insight + TL)
+
+**Descend into the sub-jaxpr but re-emit through the ORIGINAL primitive's own
+`bind` with its params threaded — NEVER re-wrap in a different primitive.** A
+fresh `jax.jit(_inner_call)` synthesizes a NEW higher-order eqn whose params
+default, dropping `prevent_cse`/`donation`/`shardings`/`name`. One rule yields:
+jit-transparent-with-continuous-CF-counter (fixes F2), cond/switch
+branch-visible addressing (fixes F1), remat-preserving (subsumes A2).
+
+### M2 AYS (host-side layer, proportionate review)
+
+`ays/ays_m2_sample_vmap.py`: `sample_every=k` throttle HOLDS under vmap (16
+events = 4 sampled steps × 4 lanes, steps {0,3,6,9}) — swe-m2's flagged concern
+(batched-cond runs both branches → fire every step) did NOT materialize;
+`jax.debug.callback`'s vmap rule masks per-lane. Corroborated by arm B's
+independent `attack_sample_vmap.py`.
 
 ## AYS counterexamples (TL)
 
