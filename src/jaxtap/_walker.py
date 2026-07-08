@@ -4,19 +4,43 @@ jax-tap B-core: recursive jaxpr-walker transform.
 Stable addressing scheme
 ------------------------
 Each nesting level maintains a single counter ``n_cf`` that increments for
-every control-flow equation encountered at that level, regardless of kind.
+every higher-order primitive encountered at that level, regardless of kind.
 This produces paths like::
 
-    scan[0]           -- first CF eqn at top level is a scan
-    scan[0]/while[1]  -- second CF eqn inside scan[0] body is a while
-    scan[0]/scan[0]   -- first CF eqn inside scan[0] body is itself a scan
+    scan[0]                    -- first boundary at top level is a scan
+    scan[0]/while[1]           -- second boundary inside scan[0] body is a while
+    scan[0]/scan[0]            -- first boundary inside scan[0] body is itself a scan
+    jit[0]/scan[0]             -- first boundary inside a jit is a scan
+    cond[0]/b1/scan[0]         -- scan in branch-1 of the first cond
+    remat[0]/scan[0]           -- scan inside a checkpoint boundary
 
-The counter increments for ALL CF primitives at a level (whether or not they
-are in ``ops``), so addresses are stable when ops filtering changes.
+The counter increments for ALL higher-order primitives at a level (whether or
+not they are in ``ops``), so addresses are stable when ops filtering changes.
+
+Boundary-visible addressing (M3 remediation)
+---------------------------------------------
+Every sub-jaxpr-carrying higher-order primitive gets a path segment:
+``jit[k]``, ``cond[k]/b{j}``, ``remat[k]`` — alongside ``scan[k]``/``while[k]``.
+This makes paths structurally UNIQUE across jit/cond/remat boundaries (fixes
+F2) and honest (the address shows where the tap actually lives, fixes F1).
+
+F1: instrumentation was silently dropped inside ``cond``/``switch``/``remat2``
+    because the walker bound them opaquely without recursing.  Fix: recurse
+    into every branch (cond/switch) or sub-jaxpr (remat2).
+
+F2: jit boundary passed the path unchanged and _interp reset n_cf=0, causing
+    a jit-nested scan to collide with a sibling top-level scan.  Fix: jit
+    counts in n_cf and appends ``jit[k]/`` to the path before recursing.
 
 Call-primitive dispatch
 -----------------------
-``jit`` / ``pjit`` / ``closed_call`` carry the sub-jaxpr under ``params["jaxpr"]``.
+``jit`` / ``pjit`` / ``closed_call`` carry the sub-jaxpr under ``params["jaxpr"]``
+(a ClosedJaxpr).
+``remat2`` carries the sub-jaxpr under ``params["jaxpr"]`` (a bare Jaxpr with
+empty constvars; all inputs come from eqn.invars).
+``cond`` (used for both ``lax.cond`` and ``lax.switch``) carries branch jaxprs
+under ``params["branches"]`` (tuple of ClosedJaxpr); ``invals[0]`` is the int32
+branch selector; ``invals[1:]`` are the shared branch operands.
 ``custom_jvp_call`` / ``custom_vjp_call`` carry it under ``params["call_jaxpr"]``.
 
 v1 policy for ``custom_jvp_call`` / ``custom_vjp_call``: bind opaquely, do NOT
@@ -36,8 +60,23 @@ pattern preserves the custom JVP/VJP rule so ``jax.grad(verbose(f))``
 differentiates correctly through instrumented programs.
 
 v1 policy for ``jit`` / ``pjit`` / ``closed_call``: recurse into the inner jaxpr
-and re-wrap the interpreted sub-call in a fresh ``jax.jit`` so that the compile
-boundary is preserved when the transformed function is called without an outer jit.
+with an extended path (``jit[k]/``), then re-wrap in a fresh ``jax.jit`` to
+preserve the compile boundary.  NOTE: this fresh jit does not preserve the
+original ``donated_invars``/``in_shardings``/``out_shardings`` params — a known
+limitation acceptable for pre-v1.  For ``remat2``, ``jax.checkpoint`` is used
+with ``prevent_cse`` and ``policy`` threaded from the original eqn params.
+
+Known v1 boundaries (not fixed here, documented)
+-------------------------------------------------
+A1 — vmap(while_loop): ``while_loop`` inside a ``vmap`` emits ghost events
+     (one per vmap lane in addition to the real ones) because the vmap
+     transformation copies the body trace.  This is inherent to how JAX's
+     vmap-while interacts with ``jax.debug.callback``.
+
+A3 — remat + grad double-fire: a scan inside a ``jax.checkpoint`` region fires
+     its tap once on the forward pass and once on the backward pass (remat
+     re-executes the forward body during differentiation).  Both firings carry
+     correct carry values; the duplication is inherent to rematerialisation.
 
 Filter hooks (M2)
 -----------------
@@ -47,6 +86,10 @@ opaquely (same semantics as a primitive not in ``ops``): the address counter sti
 advances (addressing stability), but the node's body is NOT recursed into and no
 per-step tap_cb calls are emitted for it.  This is intentional and mirrors the
 ``ops`` filtering contract.
+
+Note: with boundary-visible addressing, ``max_depth`` now counts ALL higher-order
+boundaries (jit, cond, remat, scan, while) — a scan inside a jit at
+``jit[0]/scan[0]`` has depth 1, not 0.
 
 ``sample_every`` gating lives one level up, in the ``tap_cb`` closure built by
 ``verbose()`` in ``__init__.py``.  That closure wraps the callback in a device-side
@@ -67,14 +110,17 @@ from ._rewrites import rewrite_scan, rewrite_while
 # Constants
 # ---------------------------------------------------------------------------
 
-# Primitives whose sub-jaxpr lives under params["jaxpr"].
+# All higher-order primitives that get a boundary counter slot in n_cf.
+# This makes addressing stable and boundary-visible regardless of ops filtering.
+_BOUNDARY_PRIMS: frozenset[str] = frozenset(
+    {"scan", "while", "cond", "remat2", "jit", "pjit", "closed_call"}
+)
+
+# jit-family: the sub-jaxpr lives under params["jaxpr"] (a ClosedJaxpr).
 _JIT_PRIMS: frozenset[str] = frozenset({"jit", "pjit", "closed_call"})
 
 # AD-boundary primitives: bind opaquely (see module docstring).
 _AD_PRIMS: frozenset[str] = frozenset({"custom_jvp_call", "custom_vjp_call"})
-
-# All control-flow primitives (counted for stable addressing regardless of ops).
-_CF_PRIMS: frozenset[str] = frozenset({"scan", "while"})
 
 TapCallback = Callable[..., None]
 
@@ -104,7 +150,8 @@ def interpret(
         nodes (addressing stability).
     max_depth:
         Optional depth limit.  CF nodes at depth > max_depth (depth = number
-        of ``/`` in the path) are bound opaquely.
+        of ``/`` in the path) are bound opaquely.  With boundary-visible
+        addressing, jit/cond/remat boundaries each add 1 to the depth.
 
     Returns the output pytree of ``f(*args)``.
     """
@@ -153,7 +200,7 @@ def _interp(
     for v, val in zip(jaxpr.invars, args):
         env[v] = val
 
-    n_cf = 0  # per-level CF counter for stable path addressing
+    n_cf = 0  # per-level boundary counter for stable path addressing
 
     # Closure that propagates where/max_depth through recursive calls;
     # _rewrites.py calls interp_fn with the same 6-argument signature.
@@ -166,7 +213,9 @@ def _interp(
         invals = [_read(env, a) for a in eqn.invars]
         prim_name = eqn.primitive.name
 
-        if prim_name in _CF_PRIMS:
+        if prim_name in _BOUNDARY_PRIMS:
+            # ALL higher-order primitives get a boundary counter slot, whether
+            # or not they are in ops (addressing stability + boundary-visible paths).
             cf_index = n_cf
             n_cf += 1
 
@@ -194,22 +243,77 @@ def _interp(
                     if not eqn.primitive.multiple_results:
                         outvals = [outvals]
 
+            elif prim_name == "cond":
+                # F1 fix: recurse into all branches (cond and switch both use the
+                # same primitive; branches tuple has 2 or N ClosedJaxpr objects).
+                # invals[0] is the int32 branch selector; invals[1:] are the shared
+                # operands.  Re-emit through jax.lax.switch (handles N branches).
+                branches = eqn.params["branches"]
+                index = invals[0]  # int32 branch selector
+                operands = invals[1:]  # shared operands for all branches
+
+                def _make_branch(branch_jaxpr: "jax_core.ClosedJaxpr", branch_idx: int) -> Callable:
+                    branch_path = f"{path}cond[{cf_index}]/b{branch_idx}/"
+
+                    def branch_fn(*ops_tuple: Any) -> tuple:
+                        return tuple(
+                            _recurse(
+                                branch_jaxpr.jaxpr,
+                                branch_jaxpr.consts,
+                                list(ops_tuple),
+                                tap_cb,
+                                ops,
+                                branch_path,
+                            )
+                        )
+
+                    return branch_fn
+
+                instrumented_branches = [_make_branch(b, j) for j, b in enumerate(branches)]
+                result = jax.lax.switch(index, instrumented_branches, *operands)
+                outvals = list(result) if isinstance(result, (list, tuple)) else [result]
+
+            elif prim_name == "remat2":
+                # F1 fix: recurse inside remat2 sub-jaxpr, re-emit through
+                # jax.checkpoint with original prevent_cse and policy preserved.
+                # NOTE: params["jaxpr"] for remat2 is a bare Jaxpr (not ClosedJaxpr);
+                # constvars are empty — all inputs come through eqn.invars.
+                inner_jaxpr = eqn.params["jaxpr"]  # bare Jaxpr
+                prevent_cse = eqn.params["prevent_cse"]
+                policy = eqn.params["policy"]
+                new_path = f"{path}remat[{cf_index}]/"
+
+                def _inner_remat(*flat_in: Any, _j: Any = inner_jaxpr, _p: str = new_path) -> tuple:
+                    return tuple(_recurse(_j, [], list(flat_in), tap_cb, ops, _p))
+
+                result = jax.checkpoint(_inner_remat, prevent_cse=prevent_cse, policy=policy)(
+                    *invals
+                )
+                outvals = list(result) if isinstance(result, (list, tuple)) else [result]
+
+            elif prim_name in _JIT_PRIMS:
+                # F2 fix: make jit boundary visible in path (jit[k]/ prefix).
+                # The inner jaxpr is a ClosedJaxpr; recurse into it with the
+                # extended path, then re-wrap in jax.jit to preserve the compile
+                # boundary.
+                # Limitation: the fresh jax.jit does not thread the original
+                # donated_invars/in_shardings/out_shardings params (acceptable pre-v1).
+                inner = eqn.params["jaxpr"]  # ClosedJaxpr
+                new_path = f"{path}jit[{cf_index}]/"
+
+                def _inner_jit(*flat_in: Any, _j: Any = inner, _p: str = new_path) -> Any:
+                    return _recurse(_j.jaxpr, _j.consts, list(flat_in), tap_cb, ops, _p)
+
+                result = jax.jit(_inner_jit)(*invals)
+                outvals = list(result) if isinstance(result, (list, tuple)) else [result]
+
             else:
-                # CF primitive not in ops: bind opaquely (still counted above).
+                # Higher-order primitive not handled (e.g. scan/while not in ops):
+                # bind opaquely — boundary counter already advanced above.
                 bind_params = eqn.primitive.get_bind_params(eqn.params)
                 outvals = eqn.primitive.bind(*invals, **bind_params)
                 if not eqn.primitive.multiple_results:
                     outvals = [outvals]
-
-        elif prim_name in _JIT_PRIMS:
-            inner = eqn.params["jaxpr"]
-
-            def _inner_call(*flat_in, _j=inner, _p=path):
-                return _recurse(_j.jaxpr, _j.consts, list(flat_in), tap_cb, ops, _p)
-
-            result = jax.jit(_inner_call)(*invals)
-            # Normalise to list; jit preserves the pytree structure of the return.
-            outvals = list(result) if isinstance(result, (list, tuple)) else [result]
 
         elif prim_name in _AD_PRIMS:
             # Bind opaquely — do NOT recurse (see module docstring).
