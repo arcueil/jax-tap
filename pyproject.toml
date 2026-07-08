@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jax-tap"
+version = "0.1.0"
+description = "Zero-code-change runtime telemetry for JAX control flow"
+authors = [{ name = "arcueil", email = "junpenglao@gmail.com" }]
+license = "Apache-2.0"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["jax>=0.10"]
+
+[project.urls]
+Homepage = "https://github.com/arcueil/jax-tap"
+Repository = "https://github.com/arcueil/jax-tap"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jaxtap"]
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["proofs/"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
