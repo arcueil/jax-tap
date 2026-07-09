@@ -147,6 +147,39 @@ select=lambda leaves, *, path: {"node": path, "value": leaves[0]}
 #   → TapEvent.value = {"node": "scan[0]", "value": ...}
 ```
 
+## One emission primitive (how `record` and `verbose` relate)
+
+Everything that ever leaves the device goes through a single primitive:
+`jax.debug.callback`. The `with` form contains no emission code of its own —
+it is lifecycle machinery (patch, registry, restore, routing) that applies
+the same `verbose()` transform at the intercepted call site. The full
+topography, for a progress bar:
+
+```text
+with tap.record(on_step=bar_update):     patches jax.lax.scan on __enter__
+    run(...)                             your code, unmodified
+      └─ your code calls jax.lax.scan(body, ...)
+           └─ the PATCHED scan fires → interceptor (outermost call only)
+                └─ builds g = λ init, xs: original_scan(body, init, xs)
+                └─ calls verbose(g, on_step=<router>, select=..., sample_every=...)
+                     └─ verbose builds the tap_cb closures — the ONLY place
+                        jax.debug.callback exists in the codebase
+                          └─ the walker rebuilds the scan; the rewrites inject
+                             tap_cb(path, step, *carry) at the body's return
+                               └─ DEVICE, per sampled step:
+                                    lax.cond(step % se == 0,
+                                       jax.debug.callback(host_fn, step, *selected))
+                                     └─ HOST: router → the ACTIVE context
+                                          → recorder.append(TapEvent)
+                                          → your bar_update(TapEvent)
+```
+
+Two consequences of this shape: both forms are event-equivalent by
+construction (same transform, applied at a different moment), and the
+trace-time-config boundary applies to both identically (the callback and
+`select` are baked by `verbose`'s trace either way) while the HOST routing
+stays live (events always go to the currently-active context).
+
 ## The debugging toolkit
 
 jax-tap ships four ergonomic helpers for the most common debugging patterns.
