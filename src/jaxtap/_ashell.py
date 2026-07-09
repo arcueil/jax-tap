@@ -543,6 +543,8 @@ class _RecordContext:
         max_depth: "int | None" = None,
         taps: "Sequence[Any]" = (),
         on_step: "Callable | None" = None,
+        alert: "Callable | None" = None,
+        alert_once: bool = False,
     ) -> None:
         self._select = select
         self._ops = ops
@@ -551,6 +553,8 @@ class _RecordContext:
         self._max_depth = max_depth
         self._taps = taps
         self._extra_on_step = on_step  # optional live-stream callback
+        self._alert = alert
+        self._alert_once = alert_once
         self._recorder: "FlightRecorder | None" = None
         self._key: str | None = None
         self._owner_thread: int | None = None
@@ -744,6 +748,8 @@ class _RecordContext:
             where=self._where,
             max_depth=self._max_depth,
             taps=list(self._taps),
+            alert=self._alert,
+            alert_once=self._alert_once,
             _start_cf_index=_start_idx,
         )(init, xs)
 
@@ -779,5 +785,7 @@ class _RecordContext:
             where=self._where,
             max_depth=self._max_depth,
             taps=list(self._taps),
+            alert=self._alert,
+            alert_once=self._alert_once,
             _start_cf_index=_start_idx,
         )(init_val)

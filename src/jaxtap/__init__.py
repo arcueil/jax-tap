@@ -304,6 +304,7 @@ def _accepts_path(fn: "Callable") -> bool:
 _warned: set[int] = set()  # tracks id(on_step) that have warned once this session
 _alert_warned: set[int] = set()  # tracks id(alert_fn) that have warned once
 # NOTE: id() values can be reused after GC; warn-once dedup is best-effort for M0.
+# Shared by both _fire_alert (primitive taps) and _fire_carry_alert (carry taps).
 
 
 def _guard(on_step: Callable[[TapEvent], None], event: TapEvent) -> None:
@@ -403,6 +404,55 @@ def _fire_alert(
             pass
 
 
+def _fire_carry_alert(
+    alert_fn: "Callable[[TapEvent], Any]",
+    event: TapEvent,
+    alert_once: bool,
+    _carry_once_fired: "set[str]",
+) -> None:
+    """Fire a carry-tap alert callable on a TapEvent; write terse FAIL line if truthy.
+
+    Extends the ``_fire_alert`` machinery to carry taps:
+
+    - ``alert_fn`` receives the full :class:`TapEvent` (not just ``event.value``).
+    - ``msg`` in the output line is ``str(result)`` when ``result`` is a ``str``,
+      otherwise the fixed label ``"alert"``.
+    - ``_carry_once_fired`` is a per-:func:`verbose`-call ``set[str]`` tracking
+      which paths have already fired; when ``alert_once`` is True and the path
+      is already in the set, the call is a no-op.
+    - Runs inside the ``_guard`` discipline: a raising callable warns once via
+      ``_alert_warned`` (shared with primitive-tap alerts) and is suppressed.
+    """
+    alert_id = id(alert_fn)
+    try:
+        result = alert_fn(event)
+    except Exception as exc:  # noqa: BLE001
+        if alert_id not in _alert_warned:
+            _alert_warned.add(alert_id)
+            msg = (
+                f"jaxtap: carry alert callable raised {type(exc).__name__}: {exc!s}. "
+                "Alert suppressed for this callable to preserve program behaviour."
+            )
+            try:
+                warnings.warn(msg, UserWarning, stacklevel=1)
+            except Exception:  # noqa: BLE001
+                pass
+        return
+    if result:
+        if alert_once:
+            if event.path in _carry_once_fired:
+                return
+            _carry_once_fired.add(event.path)
+        total_str = str(event.total) if event.total is not None else "?"
+        line_msg = result if isinstance(result, str) else "alert"
+        try:
+            sys.stderr.write(
+                f"[tap] FAIL {event.path} {event.step}/{total_str}: {line_msg}\n"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -418,13 +468,15 @@ _OP_NAME_MAP: dict[str, str] = {
 def verbose(
     f: Callable,
     *,
-    on_step: Callable[[TapEvent], None],
+    on_step: "Callable[[TapEvent], None] | None" = None,
     select: Callable | None = None,
     ops: tuple[str, ...] = ("scan", "while_loop"),
     sample_every: int = 1,
     where: "Callable[[str], bool] | None" = None,
     max_depth: "int | None" = None,
     taps: "Sequence[PrimitiveTap]" = (),
+    alert: "Callable[[TapEvent], Any] | None" = None,
+    alert_once: bool = False,
     _start_cf_index: int = 0,
 ) -> Callable:
     """
@@ -438,7 +490,24 @@ def verbose(
     on_step:
         Host callback called with a :class:`TapEvent` after each control-flow
         iteration or matched primitive.  Must never raise (failures are caught
-        and warned once).
+        and warned once).  Default: ``None``.  At least one of ``on_step`` or
+        ``alert`` must be provided.
+    alert:
+        Optional HOST-side callable evaluated on each carry-tap :class:`TapEvent`
+        (the same event that ``on_step`` would receive).  When truthy, emits one
+        terse line to stderr::
+
+            [tap] FAIL {path} {step}/{total}: {msg}
+
+        where ``msg`` is the returned value when it is a ``str``, otherwise the
+        fixed label ``"alert"``.  Runs inside the ``_guard`` discipline (never
+        propagates).  Fires BEFORE ``on_step``; both run; their results are
+        independent.  Alert without ``on_step`` is legal (alert-only tap).
+        Default: ``None``.
+    alert_once:
+        When ``True``, the alert fires at most once per path per :func:`verbose`
+        call.  Subsequent truthy events from the same path are silently dropped.
+        Mirrors the ``once=`` semantics of :func:`on`.  Default: ``False``.
     select:
         Optional traced-side callable applied to the carry tuple INSIDE the
         traced program before the host callback.  Receives a tuple of carry
@@ -504,6 +573,11 @@ def verbose(
     if sample_every < 1:
         raise ValueError(f"sample_every must be >= 1, got {sample_every}")
 
+    # Per-verbose()-call set tracking which paths have already fired a carry alert
+    # with alert_once=True.  Mutable so all _host closures for this verbose() call
+    # share the same once-budget across every loop site.
+    _carry_once_fired: set[str] = set()
+
     internal_ops: frozenset[str] = frozenset(
         _OP_NAME_MAP[op] for op in ops if op in _OP_NAME_MAP
     )
@@ -533,10 +607,12 @@ def verbose(
 
             def _host(step_: Any, *flat_vals: Any) -> None:
                 value = jax.tree_util.tree_unflatten(sel_tree, list(flat_vals))
-                _guard(
-                    on_step,
-                    TapEvent(path=path, step=int(step_), value=value, total=total),
-                )
+                event = TapEvent(path=path, step=int(step_), value=value, total=total)
+                # alert fires BEFORE on_step; both are independent.
+                if alert is not None:
+                    _fire_carry_alert(alert, event, alert_once, _carry_once_fired)
+                if on_step is not None:
+                    _guard(on_step, event)
 
             jax.debug.callback(_host, step, *flat_selected, ordered=False)
 
@@ -548,10 +624,12 @@ def verbose(
             path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
         ) -> None:
             def _host(step_: Any, *leaves: Any) -> None:
-                _guard(
-                    on_step,
-                    TapEvent(path=path, step=int(step_), value=leaves, total=total),
-                )
+                event = TapEvent(path=path, step=int(step_), value=leaves, total=total)
+                # alert fires BEFORE on_step; both are independent.
+                if alert is not None:
+                    _fire_carry_alert(alert, event, alert_once, _carry_once_fired)
+                if on_step is not None:
+                    _guard(on_step, event)
 
             jax.debug.callback(_host, step, *carry_leaves, ordered=False)
 
@@ -636,7 +714,8 @@ def verbose(
             def _host(step_: Any, *flat_vals: Any) -> None:
                 value = jax.tree_util.tree_unflatten(sel_tree, list(flat_vals))
                 event = TapEvent(path=path, step=int(step_), value=value, total=total)
-                _guard(on_step, event)
+                if on_step is not None:
+                    _guard(on_step, event)
                 if _spec.alert is not None:
                     _fire_alert(_spec, event, _of)
 
@@ -683,6 +762,8 @@ def record(
     max_depth: "int | None" = None,
     taps: "Sequence[PrimitiveTap]" = (),
     on_step: "Callable[[TapEvent], None] | None" = None,
+    alert: "Callable[[TapEvent], Any] | None" = None,
+    alert_once: bool = False,
 ) -> "tuple[Callable, FlightRecorder] | _RecordContext":
     """
     Dual-form recorder for zero-code-change telemetry.
@@ -759,6 +840,8 @@ def record(
             max_depth=max_depth,
             taps=taps,
             on_step=on_step,
+            alert=alert,
+            alert_once=alert_once,
         )
 
     from .collectors import FlightRecorder as _FlightRecorder
@@ -786,6 +869,8 @@ def record(
         where=where,
         max_depth=max_depth,
         taps=taps,
+        alert=alert,
+        alert_once=alert_once,
     )
     return tapped, recorder
 

@@ -314,6 +314,57 @@ with tap.record(select=lambda leaves: leaves[0], on_step=bar):
 
 This pattern requires no total or manual step accounting — the tap streams the carry value that IS the progress metric. See `proofs/semantic-progress/semantic_progress.py` for a live example.
 
+### Carry alerts
+
+The `alert=` parameter on `tap.verbose` (and `tap.record`) turns a carry tap
+into a live tripwire.  The callable runs host-side on every sampled
+`TapEvent`; a truthy return emits one terse line to stderr with no other
+action required.
+
+```python
+import jax
+import jax.numpy as jnp
+import jaxtap as tap
+
+THRESHOLD = 5.0   # alert when carry exceeds this value
+
+def accumulator(x0):
+    """Carry increments each step; bug: no guard once it exceeds threshold."""
+    def body(carry, step_frac):
+        return carry + step_frac, carry
+    xs = jnp.linspace(0.0, 2.0, 10, dtype=jnp.float32)
+    return jax.lax.scan(body, x0, xs)
+
+# One-line tripwire — delete the with-block when done debugging.
+# alert receives the full TapEvent; return a str for a custom message
+# or True for the default "alert" label.
+with tap.record(
+    select=lambda leaves: leaves[0],          # ship carry scalar to host
+    alert=lambda e: (                         # host-side predicate
+        f"carry={float(e.value):.2f} exceeded {THRESHOLD}"
+        if float(e.value) > THRESHOLD else False
+    ),
+    alert_once=True,                          # silence after first hit
+) as rec:
+    accumulator(jnp.float32(0.0))  # unmodified
+
+# Output to stderr (live, on first crossing):
+# [tap] FAIL scan[0] 7/10: carry=6.22 exceeded 5.0
+```
+
+**Rules of thumb**
+
+- `alert` receives the same `TapEvent` as `on_step`.  Return a `str` for a
+  custom message, any other truthy value for the fixed label `"alert"`.
+- `alert_once=True` fires at most once per path — useful to silence the flood
+  from a stuck loop while still catching the first occurrence.
+- alert runs before `on_step`; both run; a raising alert warns once and steps
+  aside (never touches the computation).
+- `sample_every` gates carry taps equally: `alert` only sees the events that
+  cross the host boundary.
+- Zero device-side cost: `alert` is purely host-side.  The compiled XLA
+  artifact is identical whether or not `alert=` is set.
+
 ## What the first call tells you
 
 The first call to a jitted function pays trace + compile + execute in one opaque wall-time block. Naive profiling attributes it all to compilation — but **the first tap event's arrival timestamp IS the compile/execute boundary**.
