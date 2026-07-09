@@ -531,10 +531,13 @@ def verbose(
     f:
         The function to instrument.
     on_step:
-        Host callback called with a :class:`TapEvent` after each control-flow
-        iteration or matched primitive.  Must never raise (failures are caught
-        and warned once).  Default: ``None``.  At least one of ``on_step`` or
-        ``alert`` must be provided.
+        Optional host callback called with a :class:`TapEvent` after each
+        control-flow iteration or matched primitive.  If provided, it must
+        never raise (failures are caught, warned once, and suppressed to
+        preserve program behavior).  When ``None``, a bare verbose trace
+        is created with zero runtime cost (no debug_callback baked into
+        jitted code).  Default: ``None``.  Both ``on_step`` and ``alert``
+        may be ``None`` (bare trace, no callbacks).
     alert:
         Optional HOST-side callable evaluated on each carry-tap :class:`TapEvent`
         (the same event that ``on_step`` would receive).  When truthy, emits one
