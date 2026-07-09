@@ -652,6 +652,24 @@ def verbose(
 
     Notes
     -----
+    **vmap × while_loop carry taps**: when ``f`` contains a ``while_loop``
+    and is wrapped in ``jax.vmap``, carry taps deliver exactly one event per
+    real per-lane iteration (not one per joint iteration).  jaxtap re-evaluates
+    the while cond inside the body to compute a per-lane active mask and drops
+    ghost events host-side before constructing ``TapEvent`` — so ``on_step``
+    and ``alert`` only see events from lanes where the cond was still True.
+
+    **Residual prim-tap ghost-firing**: primitive taps (``taps=[tap.on(...)]``)
+    inside a vmapped while body still fire for all joint iterations, including
+    ghost ones from finished lanes.  Carry-tap ghost suppression is exact;
+    prim-tap suppression is a future arc.
+
+    **While-loop overhead**: the A1 mitigation adds ~13 µs/iter unconditionally
+    to all while-loop tapping (vmapped or not) due to the extra cond evaluation
+    and one additional callback argument.  Expensive convergence-check conds
+    (e.g. ``norm(carry) > tol``) add ~3–7 µs/iter on top
+    (see ``bench/while_cond_overhead.py``).
+
     **Carry boundary & pytree erasure**: Jaxprs are flat — tracing erases the
     carry's pytree structure and it is NOT recoverable from the scan equation.
     When ``select`` is ``None``, ``TapEvent.value`` is a *flat tuple of carry
@@ -680,8 +698,14 @@ def verbose(
         # No carry-tap observers at all.  Skip jax.debug.callback entirely so no
         # no-op callback (~33 µs/event on CPU) is traced into the compiled artifact.
         # Primitive-tap callbacks (prim_tap_fn below) are unaffected.
+        # _while_active kwarg accepted (and ignored) so rewrite_while can always
+        # call tap_cb(..., _while_active=active) unconditionally.
         def tap_cb(
-            path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
+            path: str,
+            step: Any,
+            *carry_leaves: Any,
+            total: "int | None" = None,
+            _while_active: Any = None,
         ) -> None:
             pass
 
@@ -696,8 +720,14 @@ def verbose(
             # so ``select`` runs on-device before the host-boundary crossing.
             # ``total`` is a Python int (or None) passed as a kwarg from the rewrites;
             # it is captured in ``_host`` via closure — not a JAX argument.
+            # ``_while_active`` is a JAX bool (or None) from rewrite_while; when not
+            # None the host drops ghost events from vmap+while_loop iterations.
             def _base_tap_cb(
-                path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
+                path: str,
+                step: Any,
+                *carry_leaves: Any,
+                total: "int | None" = None,
+                _while_active: Any = None,
             ) -> None:
                 # _select_wants_path is a Python bool: this branch resolves at trace time.
                 selected = (
@@ -709,52 +739,124 @@ def verbose(
                 # Capture pytree structure at Python (trace) time for host-side recon.
                 sel_tree = jax.tree_util.tree_structure(selected)
 
-                def _host(step_: Any, *flat_vals: Any) -> None:
-                    value = jax.tree_util.tree_unflatten(sel_tree, list(flat_vals))
-                    event = TapEvent(
-                        path=path, step=step_.item(), value=value, total=total
-                    )
-                    # alert fires BEFORE on_step; both are independent.
-                    if alert is not None:
-                        _fire_carry_alert(alert, event, alert_once, _carry_once_fired)
-                    if on_step is not None:
-                        _guard(on_step, event)
+                if _while_active is not None:
+                    # A1 mitigation: append active mask as the last callback arg.
+                    # On the host, drop the event before constructing TapEvent when
+                    # the lane is inactive (ghost vmap+while iteration).
+                    def _host(step_: Any, *flat_vals_and_active: Any) -> None:
+                        *flat_vals, active_ = flat_vals_and_active
+                        if not active_.item():
+                            return  # ghost vmap+while lane — drop silently
+                        value = jax.tree_util.tree_unflatten(sel_tree, list(flat_vals))
+                        event = TapEvent(
+                            path=path, step=step_.item(), value=value, total=total
+                        )
+                        # alert fires BEFORE on_step; both are independent.
+                        if alert is not None:
+                            _fire_carry_alert(
+                                alert, event, alert_once, _carry_once_fired
+                            )
+                        if on_step is not None:
+                            _guard(on_step, event)
 
-                jax.debug.callback(_host, step, *flat_selected, ordered=False)
+                    jax.debug.callback(
+                        _host, step, *flat_selected, _while_active, ordered=False
+                    )
+                else:
+
+                    def _host(step_: Any, *flat_vals: Any) -> None:
+                        value = jax.tree_util.tree_unflatten(sel_tree, list(flat_vals))
+                        event = TapEvent(
+                            path=path, step=step_.item(), value=value, total=total
+                        )
+                        # alert fires BEFORE on_step; both are independent.
+                        if alert is not None:
+                            _fire_carry_alert(
+                                alert, event, alert_once, _carry_once_fired
+                            )
+                        if on_step is not None:
+                            _guard(on_step, event)
+
+                    jax.debug.callback(_host, step, *flat_selected, ordered=False)
 
         else:
             # tap_cb is called INSIDE the traced computation; ``jax.debug.callback``
             # ships the carry leaves to the host.  ``path`` is a static Python string
             # captured in the closure.
+            # ``_while_active`` is a JAX bool (or None) from rewrite_while; when not
+            # None the host drops ghost events from vmap+while_loop iterations.
             def _base_tap_cb(
-                path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
+                path: str,
+                step: Any,
+                *carry_leaves: Any,
+                total: "int | None" = None,
+                _while_active: Any = None,
             ) -> None:
-                def _host(step_: Any, *leaves: Any) -> None:
-                    event = TapEvent(
-                        path=path, step=step_.item(), value=leaves, total=total
-                    )
-                    # alert fires BEFORE on_step; both are independent.
-                    if alert is not None:
-                        _fire_carry_alert(alert, event, alert_once, _carry_once_fired)
-                    if on_step is not None:
-                        _guard(on_step, event)
+                if _while_active is not None:
+                    # A1 mitigation: append active mask as last callback arg.
+                    def _host(step_: Any, *leaves_and_active: Any) -> None:
+                        *leaves, active_ = leaves_and_active
+                        if not active_.item():
+                            return  # ghost vmap+while lane — drop silently
+                        event = TapEvent(
+                            path=path,
+                            step=step_.item(),
+                            value=tuple(leaves),
+                            total=total,
+                        )
+                        # alert fires BEFORE on_step; both are independent.
+                        if alert is not None:
+                            _fire_carry_alert(
+                                alert, event, alert_once, _carry_once_fired
+                            )
+                        if on_step is not None:
+                            _guard(on_step, event)
 
-                jax.debug.callback(_host, step, *carry_leaves, ordered=False)
+                    jax.debug.callback(
+                        _host, step, *carry_leaves, _while_active, ordered=False
+                    )
+                else:
+
+                    def _host(step_: Any, *leaves: Any) -> None:
+                        event = TapEvent(
+                            path=path, step=step_.item(), value=leaves, total=total
+                        )
+                        # alert fires BEFORE on_step; both are independent.
+                        if alert is not None:
+                            _fire_carry_alert(
+                                alert, event, alert_once, _carry_once_fired
+                            )
+                        if on_step is not None:
+                            _guard(on_step, event)
+
+                    jax.debug.callback(_host, step, *carry_leaves, ordered=False)
 
         # Wrap with sample_every gate (device-side lax.cond) when k > 1.
         # Both branches return None (empty pytree) so lax.cond type-checks;
         # JAX's effects system ensures the debug callback fires only in the true branch.
         # ``total`` is forwarded as a Python kwarg (not a JAX argument — it is a
         # static int captured per-scan-call at trace time).
+        # ``_while_active`` is threaded through so ghost-drop still applies when
+        # sample_every gating is also active.
         if sample_every > 1:
             _uncapped = _base_tap_cb
 
             def tap_cb(
-                path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
+                path: str,
+                step: Any,
+                *carry_leaves: Any,
+                total: "int | None" = None,
+                _while_active: Any = None,
             ) -> None:
                 jax.lax.cond(
                     step % sample_every == 0,
-                    lambda _: _uncapped(path, step, *carry_leaves, total=total),
+                    lambda _: _uncapped(
+                        path,
+                        step,
+                        *carry_leaves,
+                        total=total,
+                        _while_active=_while_active,
+                    ),
                     lambda _: None,
                     step,
                 )
@@ -968,6 +1070,10 @@ def record(
     Thread delegation: with ONE context active, any calling thread's scan/while
     is attributed to it.  With >=2 simultaneous contexts, only the context
     whose owner thread matches receives events; bystanders pass through.
+
+    vmap × while_loop carry taps: ghost events from finished lanes are suppressed
+    (see :func:`verbose` Notes).  Prim-tap ghost-firing in vmapped while bodies
+    is a residual known boundary.
     """
     if f is None:
         from ._ashell import _RecordContext as _RC

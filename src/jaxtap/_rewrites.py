@@ -186,6 +186,20 @@ def rewrite_while(
 
     def body_fn(carry_step: Any) -> Any:
         carry, step = carry_step
+        # A1 mitigation: evaluate the cond predicate on the PRE-BODY carry to
+        # obtain a per-lane active mask.  Under plain (non-vmap) execution this
+        # is always True — the body only runs when cond is True.  Under
+        # vmap(while_loop), JAX runs max(trip_counts) joint iterations for ALL
+        # lanes; lanes that have already finished execute the body with stale
+        # carry values ("ghost iterations"), and active is False for those
+        # lanes.  We pass active to tap_cb so the host-side _host closure can
+        # drop ghost events before constructing a TapEvent.
+        #
+        # Cost: one extra cond_jaxpr evaluation per body iteration.  For
+        # trivial conds (counter < N) this is free.  For expensive convergence-
+        # check conds (norm(carry) > tol) it doubles the cond work per iteration
+        # — measured in bench/while_cond_overhead.py; see known boundaries.
+        (active,) = jax.core.eval_jaxpr(cj.jaxpr, cj.consts, *cconsts, *carry)
         # Pass the live step as the 7th argument, None as the 8th (total), and
         # True as the 9th (_in_loop override) so _interp gates primitive taps
         # with sample_every when inside this while body.
@@ -205,7 +219,8 @@ def rewrite_while(
         if emit_carry:
             # tap_cb already has sample_every gating baked in (see verbose()).
             # total=None because while_loop length is unknown at trace time.
-            tap_cb(here, step, *new_carry, total=None)
+            # _while_active carries the per-lane active mask for ghost filtering.
+            tap_cb(here, step, *new_carry, total=None, _while_active=active)
         return (new_carry, step + 1)
 
     carry_out, _ = jax.lax.while_loop(cond_fn, body_fn, (init, jnp.int32(0)))
