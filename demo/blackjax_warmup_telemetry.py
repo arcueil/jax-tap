@@ -88,9 +88,14 @@ def main() -> None:
     print(f"tap's last window saw:      {float(last['step_size']):.3f}, imm "
           f"[{float(last['imm'][0]):.3f}, {float(last['imm'][1]):.3f}]")
 
-    imm_ok = all(abs(float(last["imm"][i]) - ret_imm[i]) / max(ret_imm[i], 1e-6) < 0.3
+    # Cross-check semantics: the DA step size is a smooth AVERAGE -> tight
+    # tolerance; the mass matrix updates at WINDOW BOUNDARIES, and the final
+    # update can land after the last sampled step -> same-ballpark tolerance
+    # (the stream shows the adaptation PATH; the return is its endpoint).
+    ss_ok = abs(float(last["step_size"]) - ret_ss) / ret_ss < 0.15
+    imm_ok = all(0.5 < float(last["imm"][i]) / max(ret_imm[i], 1e-6) < 2.0
                  for i in range(2))
-    ok = len(rows) >= 4 and imm_ok
+    ok = len(rows) >= 4 and ss_ok and imm_ok
     print(f"\nRESULT: adaptation observed live inside an unmodified blackjax warmup "
           f"[{'PASS' if ok else 'FAIL'}]")
 
