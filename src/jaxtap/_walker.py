@@ -126,7 +126,7 @@ A1 — vmap(while_loop) carry taps: MITIGATED in fix/a1-cond-gating arc.
      Residual: primitive taps (``taps=``) inside vmapped while bodies still
      ghost-fire; the active mask is not threaded into ``prim_tap_fn``.
      Extending the mask to prim taps is a future arc.
-     Overhead: ~+4 µs/iter vs. no-A1 baseline (N=2000, K=25,
+     Overhead: ~4–8 µs/iter (run-to-run spread) vs. no-A1 baseline (N=2000, K=25,
      bench/a1_decompose.py).
 
 A3 — remat + grad double-fire: a scan inside a ``jax.checkpoint`` region fires
