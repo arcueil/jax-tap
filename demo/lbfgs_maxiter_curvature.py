@@ -60,14 +60,11 @@ def sampler(targets):
 
 
 def exit_state(leaves):
-    """Carry-tap select. One select serves every tapped node, so branch on the
-    carry arity (trace-time Python): the inner while carries (z, it, g); the
-    outer scan carries (z, eps) — ship a placeholder for it and filter by
-    path on the host side."""
-    if len(leaves) == 3:  # the inner solver's carry
-        z, it, g = leaves
-        return {"it": it, "g": jnp.abs(g)}
-    return {"it": jnp.int32(-1), "g": jnp.float32(-1.0)}  # outer scan: ignored
+    """Carry-tap select for the inner solver: ship (iterations, |grad|) —
+    two scalars per iteration. `where` below targets ONLY the while loop,
+    so this select never sees any other carry."""
+    z, it, g = leaves
+    return {"it": it, "g": jnp.abs(g)}
 
 
 def main() -> None:
@@ -83,12 +80,12 @@ def main() -> None:
 
     eps = sampler(targets)  # without tap: all finite, just mysteriously tiny
 
-    with tap.record(select=exit_state) as rec:
+    with tap.record(select=exit_state, where=lambda p: "while" in p) as rec:
         sampler(targets)  # unmodified — delete `with` after debugging
 
     # inner heartbeats arrive per iteration; a step-counter reset marks the
     # next outer solve — split into episodes and keep each exit state
-    beats = [e for e in rec.events if "while" in e.path]
+    beats = rec.events  # `where` already limited taps to the while loop
     exits, last = [], None
     for e in beats:
         if last is not None and e.step <= last.step:
