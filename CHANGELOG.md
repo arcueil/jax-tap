@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-07-09)
 
 Initial release. Zero-code-change runtime telemetry for JAX control flow.
 
@@ -21,7 +21,7 @@ Initial release. Zero-code-change runtime telemetry for JAX control flow.
   CPU; the progress idiom at `sample_every=100` costs ≈ +1–15% on realistic
   bodies; honest recommendation ladders and payload decomposition in
   `bench/README.md`.
-- **Demos** (`demo/`): nine runnable real-bug reproductions — the project's
+- **Demos** (`demo/`): ten runnable real-bug reproductions — the project's
   primary documentation for now.
 - Adversarially reviewed: two 2-arm hostile reviews (B-core, A-shell) with
   remediation and hostile fix-reviews; the full attack/repro corpus is frozen
