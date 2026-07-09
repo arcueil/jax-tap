@@ -12,6 +12,7 @@ Platform: CPU (cpu:0), JAX 0.10.2. Total wall: ~16 min.
 |-----|-------------|
 | bare | 58 |
 | manual | 423 |
+| manual-payload | 659 |
 | verbose(se=1) | 859 |
 | primtap(se=1) | 1552 |
 | record-A(se=1) | 969 |
@@ -44,6 +45,7 @@ Measurement: JIT + 1 warmup call excluded, then K=7 repeats with `jax.block_unti
 | primtap   |   1,000 |  100 |     1 |          72.039 |        68.478 |       +72.01 |         +40.05 |
 | bare      |  10,000 |    - |     1 |           0.106 |         0.056 |            — |              — |
 | manual    |  10,000 |    - |     1 |          32.901 |        31.646 |       +32.80 |              — |
+| manual-payload |  10,000 |    - |     1 |          55.411 |        54.142 |       +55.31 |         +22.51 |
 | verbose   |  10,000 |    1 |     1 |          73.381 |        71.069 |       +73.28 |         +40.48 |
 | verbose   |  10,000 |   10 |     1 |           7.256 |         7.202 |        +7.15 |         -25.65 |
 | verbose   |  10,000 |  100 |     1 |           1.034 |         0.884 |        +0.93 |         -31.87 |
@@ -77,7 +79,8 @@ Measurement: JIT + 1 warmup call excluded, then K=7 repeats with `jax.block_unti
 
 - **body**: `c = c * 1.01 + jnp.sin(x)`, carry dim=8 float32, xs ~ N(0,1), seed=42
 - **bare**: plain `lax.scan`, jitted — no callbacks
-- **manual**: `jax.debug.callback(noop, carry, ordered=False)` per step — irreducible host-callback floor
+- **manual**: `jax.debug.callback(noop, carry, ordered=False)` per step — carry-only host-callback floor
+- **manual-payload**: `jax.debug.callback(lambda i,v: None, step_i32, carry, ordered=False)` per step — same payload as verbose (step + carry); N=10 000, lanes=1 only; used to isolate jaxtap machinery cost from payload-transit cost
 - **verbose**: `tap.verbose(f, on_step=noop, sample_every=k)` — carry tap only; ops=(scan, while_loop)
 - **record-A**: `with tap.record(on_step=noop, sample_every=k): f_jit()` — A-form context manager; function compiled inside first context; context enter/exit overhead excluded from timing window
 - **primtap**: `tap.verbose(f, on_step=noop, se=k, taps=[tap.on("sin", select=lambda o: o[0][0])])` — carry tap + sin primitive tap combined; `se` gates carry tap only; **sin prim tap fires every step regardless of se**
@@ -88,23 +91,50 @@ Measurement: JIT + 1 warmup call excluded, then K=7 repeats with `jax.block_unti
 
 ## Interpretation
 
-### 1. Overhead vs the manual arm (jaxtap machinery cost)
+### 1. Overhead vs the manual arm — payload-aware decomposition
+
+The original benchmark compared verbose against a carry-only manual callback.  The
+amendment adds `manual-payload`, which ships the same data as verbose (step int32 +
+full dim-8 carry), enabling a fair apples-to-apples split.
 
 At N=10 000, se=1 (every step):
-- **bare**: 0.1 µs/step
-- **manual**: 32.9 µs/step (+32.8 µs vs bare — irreducible `jax.debug.callback` dispatch)
-- **verbose**: 73.4 µs/step (+40.5 µs vs manual) — **FINDING: 2.23× manual**
-- **record-A**: 85.2 µs/step (+52.3 µs vs manual) — **FINDING: 2.59× manual**
-- **primtap**: 151.5 µs/step (+118.6 µs vs manual) — **FINDING: 4.61× manual**
 
-All three jaxtap arms exceed the 2× manual threshold flagged in the spec.  The gap
-comes from jaxtap's added work on each event: an extra `step` argument crossing the
-host boundary, `TapEvent` dataclass construction, and the `_guard` wrapper call.
-For primtap, the sin prim tap fires an additional host callback on top of the carry
-tap, roughly doubling the callback cost per step.
+| arm | µs/step | ratio vs manual |
+|-----|---------|-----------------|
+| bare | 0.1 | — |
+| manual (carry only) | 32.9 | 1× (baseline) |
+| manual-payload (step + carry) | 55.4 | 1.69× manual |
+| verbose(se=1) | 73.4 | 2.23× manual |
+| record-A(se=1) | 85.2 | 2.59× manual |
+| primtap(se=1) | 151.5 | 4.61× manual |
 
-These overheads are real; a careful user who hand-rolls `jax.debug.callback` will
-pay ~33 µs/step; jaxtap verbose costs ~73 µs/step at se=1.
+**Two-part decomposition of the verbose cost:**
+
+**A. Payload-transit cost (the feature):** shipping one extra int32 (the step index)
+alongside the dim-8 carry raises the callback cost from 32.9 µs (carry only) to
+55.4 µs — an extra **+22.5 µs** purely from the larger host-boundary transfer.
+This is `jax.debug.callback` overhead and is unavoidable for any callback that ships
+both a step counter and carry values.
+
+**B. jaxtap machinery cost (our overhead):** verbose at 73.4 µs vs payload-equal
+manual at 55.4 µs → **+18 µs, 1.32× a payload-equal manual callback**.  This
+~18 µs covers `TapEvent` dataclass construction, the `_guard` wrapper call, and the
+module-level router dispatch that verbose adds on top of a raw `jax.debug.callback`.
+
+**FINDING 1 (revised):** The 2.23× figure conflates payload cost with machinery cost
+because the two arms carry different data.  The honest decomposition is:
+
+- **Progress-bar use case** (step scalar only, no carry shipped): a hand-rolled
+  step-scalar callback costs roughly the carry-only floor (~33 µs); verbose at
+  73 µs is **2.2× that**, which is the ceiling for this use case.
+- **Value-debugging use case** (step + carry, same data as verbose): the
+  payload-equal manual costs 55.4 µs; verbose is **1.32× that** — jaxtap
+  machinery adds ~18 µs/step beyond what you'd pay to ship the same data yourself.
+
+For record-A and primtap the machinery gap widens further — record-A adds A-form
+context dispatch (+12 µs above verbose); primtap fires a second host callback for
+the sin primitive on every step regardless of `sample_every`, roughly doubling the
+raw callback cost.
 
 ### 2. sample_every amortization curve
 

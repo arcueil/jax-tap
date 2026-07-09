@@ -1,14 +1,20 @@
 """
 bench_overhead.py — "What does the jaxtap lens cost?"
 
-Three arms for a representative scan body (dim=8 float32 carry,
+Four arms for a representative scan body (dim=8 float32 carry,
 body: c = c * 1.01 + sin(x)):
 
-  bare      — plain lax.scan, jitted, steady-state baseline
-  manual    — same scan + jax.debug.callback(noop, carry) per step (irreducible cost)
-  verbose   — tap.verbose(f, on_step=noop, sample_every=k) carry tap only
-  record-A  — with tap.record(on_step=noop, sample_every=k): f_jit() A-form context
-  primtap   — tap.verbose(..., taps=[tap.on("sin", ...)]) carry+prim tap combined
+  bare           — plain lax.scan, jitted, steady-state baseline
+  manual         — same scan + jax.debug.callback(noop, carry) per step
+  manual-payload — same as manual but ships step index + carry (mirrors verbose payload)
+  verbose        — tap.verbose(f, on_step=noop, sample_every=k) carry tap only
+  record-A       — with tap.record(on_step=noop, sample_every=k): f_jit() A-form context
+  primtap        — tap.verbose(..., taps=[tap.on("sin", ...)]) carry+prim tap combined
+
+The manual-payload arm isolates jaxtap machinery cost from payload-transit cost.
+verbose fires jax.debug.callback(_host, step, *carry_leaves, ordered=False).
+manual-payload mirrors that exactly (step int32 + dim-8 carry float32), letting you
+decompose: verbose cost = payload-transit cost + ~18 µs jaxtap machinery.
 
 Axes
 ----
@@ -34,6 +40,7 @@ Usage
   uv run python bench/bench_overhead.py           # full run (~10 min)
   uv run python bench/bench_overhead.py --smoke   # smoke run at N=100 (<30 s)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -44,7 +51,6 @@ import time
 import jax
 import jax.lax as lax
 import jax.numpy as jnp
-
 import jaxtap as tap
 
 DIM = 8
@@ -124,6 +130,34 @@ def arm_manual(N: int, lanes: int = 1):
 
     fn = jax.vmap(f) if lanes > 1 else f
     return jax.jit(fn), init
+
+
+def arm_manual_payload(N: int) -> tuple:
+    """
+    Manual arm that ships step index + full carry — same payload as verbose.
+
+    verbose fires: jax.debug.callback(_host, step, *carry_leaves, ordered=False)
+    This arm mirrors that exactly: scalar int32 step counter + dim-8 float32 carry.
+    The step counter is carried inside the scan state (as in the standard enumerated
+    pattern) so it is a traced int32, matching verbose's traced step argument.
+
+    Use the delta (verbose - manual-payload) to measure jaxtap machinery overhead
+    independent of payload-transit cost.  lanes=1 only; vmap not needed for this arm.
+    """
+    xs = make_xs(N)
+    init = (jnp.zeros(DIM), jnp.int32(0))
+
+    def body(carry, x):
+        c, i = carry
+        c2 = c * 1.01 + jnp.sin(x)
+        jax.debug.callback(lambda i_, v_: None, i, c2, ordered=False)
+        return (c2, i + 1), None
+
+    def f(carry):
+        (c, _), _ = lax.scan(body, carry, xs)
+        return c
+
+    return jax.jit(f), init
 
 
 def arm_verbose(N: int, sample_every: int = 1, lanes: int = 1):
@@ -271,15 +305,32 @@ def print_tables(rows: list[dict], compile_rows: list[tuple], smoke: bool) -> No
     print()
     print("- **body**: `c = c * 1.01 + jnp.sin(x)`, carry dim=8 float32, xs ~ N(0,1)")
     print("- **bare**: plain `lax.scan`, jitted — no callbacks")
-    print("- **manual**: `jax.debug.callback(noop, carry, ordered=False)` per step — irreducible host-callback floor")
-    print("- **verbose**: `tap.verbose(f, on_step=noop, sample_every=k)` — carry tap only; ops=(scan, while_loop)")
-    print("- **record-A**: `with tap.record(on_step=noop, sample_every=k): f_jit()` — A-form; function compiled inside first context; context enter/exit excluded from timing window")
-    print("- **primtap**: `tap.verbose(f, on_step=noop, se=k, taps=[tap.on('sin', select=...)])` — carry+prim combined; `se` gates carry tap only; sin prim fires every step")
-    print("- **vmap lanes=8**: only at N=10 000 (wall budget). Each debug.callback multiplies by lanes per step.")
-    print("- **prim-tap-only**: not measurable; ops=() prevents walker descent into scan, silencing prim taps. primtap arm = carry+prim combined.")
+    print(
+        "- **manual**: `jax.debug.callback(noop, carry, ordered=False)` per step — carry-only host-callback floor"
+    )
+    print(
+        "- **manual-payload**: `jax.debug.callback(lambda i,v: None, step_i32, carry, ordered=False)` per step — same payload as verbose (step + carry); isolates jaxtap machinery cost; N=10 000, lanes=1 only"
+    )
+    print(
+        "- **verbose**: `tap.verbose(f, on_step=noop, sample_every=k)` — carry tap only; ops=(scan, while_loop)"
+    )
+    print(
+        "- **record-A**: `with tap.record(on_step=noop, sample_every=k): f_jit()` — A-form; function compiled inside first context; context enter/exit excluded from timing window"
+    )
+    print(
+        "- **primtap**: `tap.verbose(f, on_step=noop, se=k, taps=[tap.on('sin', select=...)])` — carry+prim combined; `se` gates carry tap only; sin prim fires every step"
+    )
+    print(
+        "- **vmap lanes=8**: only at N=10 000 (wall budget). Each debug.callback multiplies by lanes per step."
+    )
+    print(
+        "- **prim-tap-only**: not measurable; ops=() prevents walker descent into scan, silencing prim taps. primtap arm = carry+prim combined."
+    )
     if smoke:
         print()
-        print("*Full run: `PYTHONUNBUFFERED=1 uv run python bench/bench_overhead.py 2>&1 | tee bench/run.log`*")
+        print(
+            "*Full run: `PYTHONUNBUFFERED=1 uv run python bench/bench_overhead.py 2>&1 | tee bench/run.log`*"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +374,7 @@ def main() -> None:
     for label, factory, kwargs in [
         ("bare", arm_bare, {"N": N_COMPILE}),
         ("manual", arm_manual, {"N": N_COMPILE}),
+        ("manual-payload", arm_manual_payload, {"N": N_COMPILE}),
         ("verbose(se=1)", arm_verbose, {"N": N_COMPILE, "sample_every": 1}),
         ("primtap(se=1)", arm_primtap, {"N": N_COMPILE, "sample_every": 1}),
     ]:
@@ -352,6 +404,13 @@ def main() -> None:
         man_med, man_min = warmup_and_time(fn, init, N, K)
         rows.append(dict(arm="manual", N=N, se="-", lanes=1, med=man_med, mn=man_min))
         print(f"  manual:        {man_med:.3f} µs/step", file=sys.stderr, flush=True)
+
+        # manual-payload (lanes=1, N=N_COMPILE only — targeted payload-isolation row)
+        if N == N_COMPILE:
+            fn, init = arm_manual_payload(N)
+            mp_med, mp_min = warmup_and_time(fn, init, N, K)
+            rows.append(dict(arm="manual-payload", N=N, se="-", lanes=1, med=mp_med, mn=mp_min))
+            print(f"  manual-payload:{mp_med:.3f} µs/step", file=sys.stderr, flush=True)
 
         # verbose (lanes=1, varying se)
         for se in SE_VALUES:
@@ -392,7 +451,11 @@ def main() -> None:
                 fn, init = arm_verbose(N, sample_every=se, lanes=lanes)
                 med, mn = warmup_and_time(fn, init, N, K)
                 rows.append(dict(arm="verbose", N=N, se=se, lanes=lanes, med=med, mn=mn))
-                print(f"  verbose(se={se:>3},l={lanes}): {med:.3f} µs/step", file=sys.stderr, flush=True)
+                print(
+                    f"  verbose(se={se:>3},l={lanes}): {med:.3f} µs/step",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     print_tables(rows, compile_rows, smoke=args.smoke)
 
