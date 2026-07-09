@@ -373,8 +373,14 @@ def _dynamic_router(event: Any) -> None:
     ctx = _select_ctx(active)
     if ctx is None or ctx._recorder is None:
         return
-    from . import _guard  # lazy to avoid circular import at module load
+    # Lazy import to avoid circular import at module load.
+    from . import _fire_carry_alert, _guard  # noqa: PLC0415
 
+    # alert fires BEFORE on_step/recorder — matching verbose() ordering.
+    # Using the ACTIVE context's alert and once-set means cache hits in a new
+    # context correctly fire the new context's alert (not the prior trace's).
+    if ctx._alert is not None:
+        _fire_carry_alert(ctx._alert, event, ctx._alert_once, ctx._carry_once_fired)
     _guard(ctx._recorder, event)
     if ctx._extra_on_step is not None:
         _guard(ctx._extra_on_step, event)
@@ -555,6 +561,10 @@ class _RecordContext:
         self._extra_on_step = on_step  # optional live-stream callback
         self._alert = alert
         self._alert_once = alert_once
+        # Per-context once-budget for carry alerts.  Initialized empty in __init__
+        # and reset fresh on each __enter__ so cache-hit calls in a new context
+        # get a new set rather than inheriting the prior context's spent budget.
+        self._carry_once_fired: set[str] = set()
         self._recorder: "FlightRecorder | None" = None
         self._key: str | None = None
         self._owner_thread: int | None = None
@@ -592,6 +602,7 @@ class _RecordContext:
         from .collectors import FlightRecorder as _FR
 
         self._recorder = _FR()
+        self._carry_once_fired = set()  # fresh once-budget for each context entry
         self._key = str(uuid.uuid4())
         self._owner_thread = threading.get_ident()
         self._next_toplevel_idx = 0
@@ -739,6 +750,9 @@ class _RecordContext:
                 _split_transpose=_split_transpose,
             )
 
+        # alert is NOT passed here: it is applied LIVE in _dynamic_router so that
+        # JIT-cache hits in a new context fire the NEW context's alert (not the
+        # baked closure's stale alert from the first trace).
         return _verbose(
             g,
             on_step=_dynamic_router,
@@ -748,8 +762,6 @@ class _RecordContext:
             where=self._where,
             max_depth=self._max_depth,
             taps=list(self._taps),
-            alert=self._alert,
-            alert_once=self._alert_once,
             _start_cf_index=_start_idx,
         )(init, xs)
 
@@ -776,6 +788,7 @@ class _RecordContext:
         def g(init_: Any) -> Any:
             return underlying(cond_fun, body_fun, init_)
 
+        # alert is NOT passed here: same live-routing reason as _intercept_scan.
         return _verbose(
             g,
             on_step=_dynamic_router,
@@ -785,7 +798,5 @@ class _RecordContext:
             where=self._where,
             max_depth=self._max_depth,
             taps=list(self._taps),
-            alert=self._alert,
-            alert_once=self._alert_once,
             _start_cf_index=_start_idx,
         )(init_val)

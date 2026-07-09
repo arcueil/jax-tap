@@ -442,3 +442,98 @@ def test_carry_alert_trace_identity():
         f"jaxpr equation count differs: {n_no} (no alert) vs {n_with} (with alert). "
         "alert= must not add any traced equations."
     )
+
+    # Full-text equality (not just equation count)
+    full_no = str(jaxpr_no)
+    full_with = str(jaxpr_with)
+    assert full_no == full_with, (
+        "full jaxpr text differs with alert= vs without. "
+        "alert must be purely host-side."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 13. A-form cache-hit: new context fires its OWN alert (AYS-1 regression)
+# ---------------------------------------------------------------------------
+
+
+def test_carry_alert_a_form_cache_hit_fires_live_context(capsys):
+    """On a JIT cache hit, the ACTIVE context's alert fires, not the traced one.
+
+    Scenario: ctx1 traces jitted f with alert_A; ctx1 exits; ctx2 re-uses the
+    same jitted f (cache hit) with alert_B.  alert_B must fire; alert_A must
+    NOT fire in ctx2's window.
+    """
+    N = 4
+    x0 = jnp.float32(0.0)
+    f = _make_step_scan(N)
+    f_jitted = jax.jit(f)
+
+    fired_A: list[str] = []
+    fired_B: list[str] = []
+
+    # ctx1: trace-and-run with alert_A
+    with tap.record(alert=lambda e: fired_A.append("A") or "alert_A") as _:
+        f_jitted(x0)
+    jax.block_until_ready(None)
+    count_A_after_ctx1 = len(fired_A)
+
+    # ctx2: cache hit — ONLY alert_B should fire
+    with tap.record(alert=lambda e: fired_B.append("B") or "alert_B") as _:
+        f_jitted(x0)
+    jax.block_until_ready(None)
+
+    # alert_A must not grow — dead context's alert must not fire in ctx2
+    assert len(fired_A) == count_A_after_ctx1, (
+        f"alert_A fired {len(fired_A) - count_A_after_ctx1} extra times during ctx2 "
+        "(stale baked alert — was not properly live-routed)"
+    )
+    # alert_B must have fired — live context's alert must fire on cache hit
+    assert len(fired_B) == N, (
+        f"alert_B fired {len(fired_B)} times during ctx2, expected {N} "
+        "(live-context alert not routed to active context)"
+    )
+
+    # Also check stderr: only alert_B lines should appear during ctx2 window
+    captured = capsys.readouterr()
+    b_lines = [ln for ln in captured.err.splitlines() if "alert_B" in ln]
+    assert len(b_lines) == N, f"expected {N} alert_B lines, got {len(b_lines)}"
+
+
+# ---------------------------------------------------------------------------
+# 14. A-form cache-hit: alert_once budget is per-context, not per-closure
+#     (AYS-2 regression)
+# ---------------------------------------------------------------------------
+
+
+def test_carry_alert_a_form_alert_once_per_context(capsys):
+    """alert_once=True budget resets for each new context on cache hits.
+
+    Scenario: ctx1 fires once; ctx2 re-uses jitted f (cache hit) — ctx2 must
+    also fire exactly once (not zero, because ctx1's closure set is stale).
+    """
+    N = 5
+    x0 = jnp.float32(0.0)
+    f = _make_step_scan(N)
+    f_jitted = jax.jit(f)
+
+    def _count_fail_lines(capsys_fixture) -> int:
+        c = capsys_fixture.readouterr()
+        return sum(1 for ln in c.err.splitlines() if ln.startswith("[tap] FAIL"))
+
+    # ctx1
+    with tap.record(alert=lambda e: True, alert_once=True) as _:
+        f_jitted(x0)
+    jax.block_until_ready(None)
+    ctx1_lines = _count_fail_lines(capsys)
+    assert ctx1_lines == 1, f"ctx1: expected 1 FAIL line, got {ctx1_lines}"
+
+    # ctx2: fresh once-budget — must also fire exactly once
+    with tap.record(alert=lambda e: True, alert_once=True) as _:
+        f_jitted(x0)
+    jax.block_until_ready(None)
+    ctx2_lines = _count_fail_lines(capsys)
+    assert ctx2_lines == 1, (
+        f"ctx2: expected 1 FAIL line, got {ctx2_lines} "
+        "(once-budget was not reset for the new context — stale closure set)"
+    )

@@ -582,77 +582,91 @@ def verbose(
         _OP_NAME_MAP[op] for op in ops if op in _OP_NAME_MAP
     )
 
-    if select is not None:
-        # FIX 3: inspect select once at verbose() call time.
-        # If it accepts 'path' (kwarg or 2nd positional), call select(leaves, path=path);
-        # otherwise call select(leaves) for backward compatibility.
-        _select_wants_path: bool = _accepts_path(select)
-
-        # tap_cb is called INSIDE the traced computation (scan/while body),
-        # so ``select`` runs on-device before the host-boundary crossing.
-        # ``total`` is a Python int (or None) passed as a kwarg from the rewrites;
-        # it is captured in ``_host`` via closure — not a JAX argument.
-        def _base_tap_cb(
-            path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
-        ) -> None:
-            # _select_wants_path is a Python bool: this branch resolves at trace time.
-            selected = (
-                select(carry_leaves, path=path)
-                if _select_wants_path
-                else select(carry_leaves)
-            )
-            flat_selected = jax.tree_util.tree_leaves(selected)
-            # Capture pytree structure at Python (trace) time for host-side recon.
-            sel_tree = jax.tree_util.tree_structure(selected)
-
-            def _host(step_: Any, *flat_vals: Any) -> None:
-                value = jax.tree_util.tree_unflatten(sel_tree, list(flat_vals))
-                event = TapEvent(path=path, step=int(step_), value=value, total=total)
-                # alert fires BEFORE on_step; both are independent.
-                if alert is not None:
-                    _fire_carry_alert(alert, event, alert_once, _carry_once_fired)
-                if on_step is not None:
-                    _guard(on_step, event)
-
-            jax.debug.callback(_host, step, *flat_selected, ordered=False)
-
-    else:
-        # tap_cb is called INSIDE the traced computation; ``jax.debug.callback``
-        # ships the carry leaves to the host.  ``path`` is a static Python string
-        # captured in the closure.
-        def _base_tap_cb(
-            path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
-        ) -> None:
-            def _host(step_: Any, *leaves: Any) -> None:
-                event = TapEvent(path=path, step=int(step_), value=leaves, total=total)
-                # alert fires BEFORE on_step; both are independent.
-                if alert is not None:
-                    _fire_carry_alert(alert, event, alert_once, _carry_once_fired)
-                if on_step is not None:
-                    _guard(on_step, event)
-
-            jax.debug.callback(_host, step, *carry_leaves, ordered=False)
-
-    # Wrap with sample_every gate (device-side lax.cond) when k > 1.
-    # Both branches return None (empty pytree) so lax.cond type-checks;
-    # JAX's effects system ensures the debug callback fires only in the true branch.
-    # ``total`` is forwarded as a Python kwarg (not a JAX argument — it is a
-    # static int captured per-scan-call at trace time).
-    if sample_every > 1:
-        _uncapped = _base_tap_cb
-
+    if on_step is None and alert is None:
+        # No carry-tap observers at all.  Skip jax.debug.callback entirely so no
+        # no-op callback (~33 µs/event on CPU) is traced into the compiled artifact.
+        # Primitive-tap callbacks (prim_tap_fn below) are unaffected.
         def tap_cb(
             path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
         ) -> None:
-            jax.lax.cond(
-                step % sample_every == 0,
-                lambda _: _uncapped(path, step, *carry_leaves, total=total),
-                lambda _: None,
-                step,
-            )
+            pass
 
     else:
-        tap_cb = _base_tap_cb
+        if select is not None:
+            # FIX 3: inspect select once at verbose() call time.
+            # If it accepts 'path' (kwarg or 2nd positional), call select(leaves, path=path);
+            # otherwise call select(leaves) for backward compatibility.
+            _select_wants_path: bool = _accepts_path(select)
+
+            # tap_cb is called INSIDE the traced computation (scan/while body),
+            # so ``select`` runs on-device before the host-boundary crossing.
+            # ``total`` is a Python int (or None) passed as a kwarg from the rewrites;
+            # it is captured in ``_host`` via closure — not a JAX argument.
+            def _base_tap_cb(
+                path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
+            ) -> None:
+                # _select_wants_path is a Python bool: this branch resolves at trace time.
+                selected = (
+                    select(carry_leaves, path=path)
+                    if _select_wants_path
+                    else select(carry_leaves)
+                )
+                flat_selected = jax.tree_util.tree_leaves(selected)
+                # Capture pytree structure at Python (trace) time for host-side recon.
+                sel_tree = jax.tree_util.tree_structure(selected)
+
+                def _host(step_: Any, *flat_vals: Any) -> None:
+                    value = jax.tree_util.tree_unflatten(sel_tree, list(flat_vals))
+                    event = TapEvent(
+                        path=path, step=int(step_), value=value, total=total
+                    )
+                    # alert fires BEFORE on_step; both are independent.
+                    if alert is not None:
+                        _fire_carry_alert(alert, event, alert_once, _carry_once_fired)
+                    if on_step is not None:
+                        _guard(on_step, event)
+
+                jax.debug.callback(_host, step, *flat_selected, ordered=False)
+
+        else:
+            # tap_cb is called INSIDE the traced computation; ``jax.debug.callback``
+            # ships the carry leaves to the host.  ``path`` is a static Python string
+            # captured in the closure.
+            def _base_tap_cb(
+                path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
+            ) -> None:
+                def _host(step_: Any, *leaves: Any) -> None:
+                    event = TapEvent(
+                        path=path, step=int(step_), value=leaves, total=total
+                    )
+                    # alert fires BEFORE on_step; both are independent.
+                    if alert is not None:
+                        _fire_carry_alert(alert, event, alert_once, _carry_once_fired)
+                    if on_step is not None:
+                        _guard(on_step, event)
+
+                jax.debug.callback(_host, step, *carry_leaves, ordered=False)
+
+        # Wrap with sample_every gate (device-side lax.cond) when k > 1.
+        # Both branches return None (empty pytree) so lax.cond type-checks;
+        # JAX's effects system ensures the debug callback fires only in the true branch.
+        # ``total`` is forwarded as a Python kwarg (not a JAX argument — it is a
+        # static int captured per-scan-call at trace time).
+        if sample_every > 1:
+            _uncapped = _base_tap_cb
+
+            def tap_cb(
+                path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
+            ) -> None:
+                jax.lax.cond(
+                    step % sample_every == 0,
+                    lambda _: _uncapped(path, step, *carry_leaves, total=total),
+                    lambda _: None,
+                    step,
+                )
+
+        else:
+            tap_cb = _base_tap_cb
 
     # Build the primitive-tap callback if any specs were provided.
     # This function is called from _interp after binding a matched primitive.
