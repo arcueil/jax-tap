@@ -84,13 +84,17 @@ carry-tap streams it and a five-bucket histogram shows the split on sight
 The lesson: the tap surfaces the DISTRIBUTION the code only ever averaged.
 **Tap class:** carry tap on controller state.
 
-### ✅ `treedepth_saturation.py` — the saturated-chain blind spot *(planned)*
-**Bug pattern:** a NUTS-style sampler silently saturates its maximum tree
-depth on some chains — a known failure signature that standard summary
-diagnostics can miss for a long time if nothing watches per-draw statistics.
-**Will show:** a per-draw carry-tap on tree depth acts as a live tripwire that
-fires the moment depth hits its ceiling.
-**Tap class:** per-draw event / carry tap.
+### ✅ `treedepth_saturation.py` — the saturated-chain blind spot
+**Bug pattern:** a NUTS-style sampler silently saturates its max tree depth in
+stiff regions — every draw still returns; means and summary diagnostics wash
+the per-draw signature out, so it can go unnoticed for months.
+**What it shows:** the carry keeps the last tree depth (as real NUTS info
+does); one tapped stream gives BOTH a live tripwire (`[tap] FAIL scan[0]
+203/2000: treedepth==10`) AND the post-hoc picture: mean depth 8.4 looks
+innocuous while 7% of draws saturated, including a 20-draw consecutive
+excursion the sampler couldn't explore at the depth it needed.
+**Tap class:** per-draw event / carry tap (live tripwire + recorder from the
+same stream).
 
 ### ⚠️ `mass_matrix_ndim_mismatch.py` — dense config ran diagonal
 **Bug pattern:** a sampler kernel dispatches on the mass matrix's `ndim`; a
