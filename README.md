@@ -34,8 +34,9 @@ while your original code contains **zero logging lines**.
 ```python
 import jaxtap as tap
 
-with tap.record(select=lambda carry: carry.logdensity.mean()) as rec:
+with tap.record(select=lambda leaves: leaves[1].mean()) as rec:
     result = warmup.run(key, x0, num_steps)   # your code, UNMODIFIED
+    # `leaves` = the loop carry's flat leaves; pick what ships to the host
 
 rec.df()    # step-indexed telemetry → pandas
 ```
@@ -72,28 +73,35 @@ The `with` form is shipped and ready to use. (The original wrapping API
 5. **Emission only.** jax-tap ships data (an in-memory recorder → `.df()`,
    JSONL). No progress bars, no display frontends — consumers own read-out.
 
-## Quick start (today's API)
+## Quick start
 
 ```python
 import jax, jax.numpy as jnp
 import jaxtap as tap
 
 def f(x0, xs):
-    def body(c, x):                       # your code — no logging lines
+    def body(c, x):                    # your code — no logging lines
         return c * 1.01 + jnp.sin(x), c
     return jax.lax.scan(body, x0, xs)
 
-# live stream:
-g = tap.verbose(f, on_step=print)                    # TapEvent(path='scan[0]', step=3, value=...)
-g(x0, xs)                                            # bitwise-identical result
+x0, xs = jnp.float32(0.0), jnp.linspace(0.0, 1.0, 100)
 
-# or record + analyse:
-g, rec = tap.record(f, select=lambda leaves: {"c": leaves[0]})
+# THE with-form (the promise): wrap the CALL, never the code
+with tap.record(select=lambda leaves: {"c": leaves[0]}) as rec:
+    f(x0, xs)                          # unmodified; bitwise-identical
+rec.events[-1]      # TapEvent(path='scan[0]', step=99, total=100, value={'c': ...})
+rec.df()            # pandas view (optional extra)
+
+# toolkit one-liners compose the same way:
+with tap.record(taps=[tap.watch_nan("cholesky", once=True)]):
+    f(x0, xs)       # -> a live "[tap] FAIL ...: NaN/Inf" line, if it ever fires
+
+# wrap-the-callable form (same power, when you have the function in hand):
+g = tap.verbose(f, on_step=print, sample_every=10)
 g(x0, xs)
-rec.df()                                             # path | step | c
 
 # volume control on big loops:
-tap.verbose(f, on_step=cb, sample_every=100, max_depth=1, where=lambda p: "while" in p)
+#   sample_every=100 · where=lambda p: p == "scan[0]" · max_depth=1
 ```
 
 ## How `select` works
