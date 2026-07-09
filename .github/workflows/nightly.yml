@@ -1,0 +1,58 @@
+name: nightly-jax-head
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install project + dev deps
+        run: uv sync --dev
+
+      - name: Install JAX nightly
+        run: |
+          uv pip install -U \
+            --prerelease=allow \
+            --index-strategy=unsafe-best-match \
+            --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
+            jax jaxlib
+
+      - name: Assert head build actually installed
+        run: |
+          uv run --no-sync python -c "
+          import jax
+          v = jax.__version__
+          print('jax', v)
+          assert 'dev' in v or '.dev' in v, f'NOT a head build: {v}'
+          "
+
+      - name: Test suite, warnings are errors
+        env:
+          PYTHONWARNINGS: "error"
+        run: uv run --no-sync pytest -q -W error
+
+      - name: File canary issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create jax-head-canary --force 2>/dev/null || true
+          existing=$(gh issue list --label jax-head-canary --state open --json number --jq length)
+          if [ "$existing" = "0" ]; then
+            gh issue create \
+              --title "nightly canary vs JAX head failed" \
+              --label jax-head-canary \
+              --body "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} — likely an upstream jax.debug.callback / jaxpr-internals change. Triage before it reaches a JAX release."
+          fi
