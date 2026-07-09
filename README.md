@@ -204,13 +204,15 @@ when the enclosing loop fires:
 ```python
 from tqdm import tqdm
 bar = tqdm(total=1000)
-with tap.record(on_step=lambda e: e.path == "scan[0]" and bar.update(1)):
+with tap.record(on_step=lambda e: e.path == "scan[0]" and bar.update(10), sample_every=10):
     run(...)
 ```
 
 The `sample_every=` parameter is your rate-limiting knob: pass it to `tap.record()`
 to emit events only every *k* steps, reducing host-boundary traffic if your loop is
-very tight.
+very tight.  At `se=10` the callback cost amortises to ~1 µs/step — this is the
+semi-production baseline per the overhead benchmark (see `bench/README.md`).
+`PrimitiveTap` callbacks are gated by the same `sample_every` when inside a loop.
 
 ## demo/ — real bugs, re-run against the tap promise
 

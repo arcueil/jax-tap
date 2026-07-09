@@ -1150,8 +1150,15 @@ def test_prim_tap_raising_on_step():
 
 def test_prim_tap_filtered_loop_silent():
     """
-    M1a: when a loop is filtered by 'where', primitive taps inside it are
-    silent (the body is not descended).  Addressing of the other loop is stable.
+    M1d FIX 2 (deliberate flip from M1a): filters control EMISSION not REACH.
+
+    With 'where' filtering scan[0] out, the walker STILL descends into scan[0]'s
+    body — so cholesky primitive taps FIRE (N events, one per step).
+    scan[0] carry taps are suppressed (emit_carry=False).
+    scan[1] is not filtered so its carry taps fire normally.
+
+    Old M1a assertion was len(chol_events)==0 (prune semantics).
+    New M1d assertion is len(chol_events)==N (descend-always semantics).
     """
     N = 4
 
@@ -1164,27 +1171,38 @@ def test_prim_tap_filtered_loop_silent():
         def body_simple(carry, _):
             return carry + 1.0, carry
 
-        # scan[0]: filtered out by where; cholesky inside it is silent
+        # scan[0]: where-filtered → emit_carry=False but body IS descended
         out1, _ = jax.lax.scan(body_with_chol, x, None, length=N)
         # scan[1]: not filtered; carry taps fire
         out2, _ = jax.lax.scan(body_simple, out1, None, length=N)
         return out2
 
     x = jnp.float32(0.0)
+    ref = f(x)
     events: list[tap.TapEvent] = []
     got = tap.verbose(
         f,
         on_step=lambda e: events.append(e),
         taps=[tap.on("cholesky")],
-        where=lambda p: "scan[1]" in p,  # filter scan[0]
+        where=lambda p: "scan[1]" in p,  # filter scan[0] emit
     )(x)
     jax.block_until_ready(got)
 
+    # Result must still be bitwise identical
+    assert np.array_equal(np.asarray(ref), np.asarray(got)), "filtered result not bitwise identical"
+
+    # M1d: cholesky FIRES inside the where-filtered scan[0] body
     chol_events = [e for e in events if "cholesky" in e.path]
-    assert len(chol_events) == 0, (
-        f"expected 0 cholesky events (scan[0] filtered, body not descended), "
+    assert len(chol_events) == N, (
+        f"expected {N} cholesky events (body descended despite where-filter), "
         f"got {len(chol_events)}"
     )
+
+    # scan[0] CARRY taps must NOT fire (emission suppressed)
+    scan0_carry = [e for e in events if e.path == "scan[0]"]
+    assert (
+        len(scan0_carry) == 0
+    ), f"expected 0 scan[0] carry events (emission filtered), got {len(scan0_carry)}"
 
     # scan[1] carry taps still fire
     scan1_events = [e for e in events if "scan[1]" in e.path]

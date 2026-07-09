@@ -82,19 +82,23 @@ and ``remat2`` the step is captured via Python closure, which is safe because
 those primitives trace their sub-functions in the current (outer) tracing
 context.
 
-Primitive taps (M1a)
---------------------
+Primitive taps (M1a → M1d FIX 1 + FIX 2)
+------------------------------------------
 After binding any NON-boundary, NON-AD eqn, ``_interp`` checks the eqn's
 primitive name against the ``prim_taps`` sequence.  On a match it fires
-``prim_tap_fn(path, step, outvals_tuple, spec)`` which lives in ``__init__.py``
-and wraps ``jax.debug.callback`` → ``_guard``-wrapped ``on_step``.
+``prim_tap_fn(path, step, outvals_tuple, spec, total, _in_loop)`` which lives
+in ``__init__.py`` and wraps ``jax.debug.callback`` → ``_guard``-wrapped ``on_step``.
 
 Primitive tap addressing: ``{enclosing_path}{prim_name}[{j}]`` where ``j`` is a
 per-level, per-prim-name counter (separate from the boundary counter ``n_cf``).
-``sample_every`` does NOT gate primitive taps in M1a (loop-carry taps only).
-Primitive taps only fire inside code the walker descends into; loops filtered
-by ``ops``/``where``/``max_depth`` are not descended, so primitive taps inside
-them are silent.
+
+M1d FIX 1: ``sample_every`` NOW gates primitive taps via a device-side
+``lax.cond(step % se == 0, fire, noop)`` when ``_in_loop=True``.  Primitive taps
+outside any loop (step sentinel -1) are always ungated regardless of se.
+
+M1d FIX 2: primitive taps fire inside EVERY descended body, including loops
+filtered by ``ops``/``where``/``max_depth`` — the filter controls carry-tap
+emission only; the body is always recursed.
 
 Known v1 boundaries (not fixed here, documented)
 -------------------------------------------------
@@ -108,14 +112,26 @@ A3 — remat + grad double-fire: a scan inside a ``jax.checkpoint`` region fires
      re-executes the forward body during differentiation).  Both firings carry
      correct carry values; the duplication is inherent to rematerialisation.
 
-Filter hooks (M2)
------------------
-``where`` and ``max_depth`` are evaluated at Python (trace) time for each CF node
-before deciding whether to rewrite it.  If a node is filtered out, it is bound
-opaquely (same semantics as a primitive not in ``ops``): the address counter still
-advances (addressing stability), but the node's body is NOT recursed into and no
-per-step tap_cb calls are emitted for it.  This is intentional and mirrors the
-``ops`` filtering contract.
+Filter hooks (M2 → M1d FIX 2: emission-only, descend-always)
+--------------------------------------------------------------
+``ops``, ``where``, and ``max_depth`` are evaluated at Python (trace) time for
+each scan/while CF node to decide whether CARRY TAPS EMIT for that node.
+Regardless of the filter result, the walker ALWAYS descends into the body jaxpr
+(via ``rewrite_scan``/``rewrite_while``) so that:
+
+- Primitive taps (``taps=``) fire inside filtered loops.
+- Nested scan/while nodes inside a filtered outer loop are evaluated
+  independently against the filter (they may or may not emit carry taps).
+
+Addressing is unchanged: the counter ``n_cf`` advances for every boundary
+primitive encountered at a level, regardless of ops/where/max_depth.
+
+Old semantics (M2): filtered nodes were bound opaquely — the body was NOT
+descended, so primitive taps inside them were silent.
+
+New semantics (M1d): the filter controls EMISSION only.  A filtered node is
+still rewritten (``emit_carry=False`` is passed to the rewrite function), so the
+body runs under the walker with no carry-tap overhead but full prim-tap coverage.
 
 Note: with boundary-visible addressing, ``max_depth`` now counts ALL higher-order
 boundaries (jit, cond, remat, scan, while) — a scan inside a jit at
@@ -125,6 +141,20 @@ boundaries (jit, cond, remat, scan, while) — a scan inside a jit at
 ``verbose()`` in ``__init__.py``.  That closure wraps the callback in a device-side
 ``lax.cond(step % k == 0, ...)`` before passing it here, so the rewrites always
 call ``tap_cb`` unconditionally and correctness is preserved.
+
+``_in_loop`` threading (M1d FIX 1)
+-----------------------------------
+A Python bool ``_in_loop`` is threaded through ``_interp`` and ``_recurse``
+to indicate whether we are currently inside a scan/while body at Python trace
+time.  This is needed to gate primitive taps with ``sample_every``:
+
+- ``_in_loop=False``: primitive tap fires unconditionally (outside any loop, or
+  the step sentinel of -1 is in play).
+- ``_in_loop=True``: primitive tap is wrapped in ``lax.cond(step % se == 0, ...)``.
+
+``rewrite_scan``/``rewrite_while`` set ``_in_loop=True`` (9th positional arg) when
+calling ``interp_fn`` for the body jaxpr.  Structural boundaries (jit/cond/remat)
+propagate the current ``_in_loop`` unchanged.
 """
 
 from __future__ import annotations
@@ -267,6 +297,7 @@ def _interp(
     prim_tap_fn: "Callable | None" = None,
     _start_cf_index: int = 0,
     total: "int | None" = None,
+    _in_loop: bool = False,
 ) -> list:
     """Evaluate ``jaxpr`` against ``args``, rewriting CF primitives in ``ops``.
 
@@ -279,7 +310,8 @@ def _interp(
     prim_taps:
         Sequence of ``PrimitiveTap`` specs for primitive-name tapping.
     prim_tap_fn:
-        Host callback builder; called as ``prim_tap_fn(path, step, outvals, spec, total)``
+        Host callback builder; called as
+        ``prim_tap_fn(path, step, outvals, spec, total, _in_loop)``
         for each matched primitive.
     _start_cf_index:
         Private kwarg.  Initial value for the top-level boundary counter.
@@ -290,6 +322,12 @@ def _interp(
         (scan: set by ``rewrite_scan`` from ``eqn.params["length"]``; while and
         outside-loop callers pass ``None``).  Forwarded to ``prim_tap_fn`` so
         that ``TapEvent.total`` is populated correctly.
+    _in_loop:
+        Python bool.  True when ``_interp`` is being traced inside a scan/while
+        body; False at the top level or inside structural boundaries
+        (jit/cond/remat) that are not themselves inside a loop.  Passed to
+        ``prim_tap_fn`` so it can gate the debug callback with
+        ``lax.cond(step % sample_every == 0, ...)`` only when inside a loop.
     """
     # Normalise sentinel: None means "not inside any loop".
     if step is None:
@@ -311,9 +349,10 @@ def _interp(
     # Per-level, per-prim-name occurrence counter for primitive tap addressing.
     n_prim_tap: dict[str, int] = {}
 
-    # Closure that propagates where/max_depth/step/prim_taps/total through
-    # recursive calls.  _rewrites.py calls interp_fn with an 8-argument
-    # signature (7th: live step, 8th: enclosing loop total or None).
+    # Closure that propagates where/max_depth/step/prim_taps/total/_in_loop
+    # through recursive calls.  _rewrites.py calls interp_fn with a 9-argument
+    # signature (7th: live step, 8th: enclosing loop total or None,
+    # 9th: _in_loop override or None to inherit from closure).
     def _recurse(
         jaxpr_: Any,
         consts_: Any,
@@ -323,7 +362,11 @@ def _interp(
         path_: Any,
         step_: Any = None,
         total_: "int | None" = None,
+        _in_loop_override: "bool | None" = None,
     ) -> Any:
+        # _in_loop_override=True is passed by rewrite_scan/rewrite_while to
+        # mark that we have entered a loop body.  None means inherit.
+        effective_in_loop = _in_loop if _in_loop_override is None else _in_loop_override
         return _interp(
             jaxpr_,
             consts_,
@@ -337,6 +380,7 @@ def _interp(
             prim_taps=prim_taps,
             prim_tap_fn=prim_tap_fn,
             total=total_,
+            _in_loop=effective_in_loop,
         )
 
     for eqn in jaxpr.eqns:
@@ -349,29 +393,33 @@ def _interp(
             cf_index = n_cf
             n_cf += 1
 
-            if prim_name == "scan" and "scan" in ops:
+            if prim_name == "scan":
+                # M1d FIX 2: ALWAYS descend into scan bodies (for prim taps and
+                # nested-loop carry taps); ops/where/max_depth control EMISSION only.
                 here = f"{path}scan[{cf_index}]"
                 depth = here.count("/")
-                # Filter hooks: where- and max_depth-filtered nodes are bound
-                # opaquely (addressing counter already advanced above).
-                if (where is None or where(here)) and (max_depth is None or depth <= max_depth):
-                    outvals = rewrite_scan(eqn, invals, tap_cb, ops, here, _recurse, step)
-                else:
-                    bind_params = eqn.primitive.get_bind_params(eqn.params)
-                    outvals = eqn.primitive.bind(*invals, **bind_params)
-                    if not eqn.primitive.multiple_results:
-                        outvals = [outvals]
+                # emit_carry: True iff this node passes all emission filters.
+                emit_carry = (
+                    "scan" in ops
+                    and (where is None or where(here))
+                    and (max_depth is None or depth <= max_depth)
+                )
+                outvals = rewrite_scan(
+                    eqn, invals, tap_cb, ops, here, _recurse, step, emit_carry=emit_carry
+                )
 
-            elif prim_name == "while" and "while" in ops:
+            elif prim_name == "while":
+                # M1d FIX 2: same descend-always policy for while.
                 here = f"{path}while[{cf_index}]"
                 depth = here.count("/")
-                if (where is None or where(here)) and (max_depth is None or depth <= max_depth):
-                    outvals = rewrite_while(eqn, invals, tap_cb, ops, here, _recurse, step)
-                else:
-                    bind_params = eqn.primitive.get_bind_params(eqn.params)
-                    outvals = eqn.primitive.bind(*invals, **bind_params)
-                    if not eqn.primitive.multiple_results:
-                        outvals = [outvals]
+                emit_carry = (
+                    "while" in ops
+                    and (where is None or where(here))
+                    and (max_depth is None or depth <= max_depth)
+                )
+                outvals = rewrite_while(
+                    eqn, invals, tap_cb, ops, here, _recurse, step, emit_carry=emit_carry
+                )
 
             elif prim_name == "cond":
                 # F1 fix: recurse into all branches (cond and switch both use the
@@ -499,6 +547,7 @@ def _interp(
             # Primitive tap: check if any spec matches this primitive name.
             # Fires on EVERY matched non-boundary, non-AD primitive.
             # total is threaded from the enclosing loop (scan length, or None).
+            # _in_loop is threaded so prim_tap_fn can gate with sample_every.
             if prim_taps and prim_tap_fn is not None:
                 matching = [spec for spec in prim_taps if spec.prim_name == prim_name]
                 if matching:
@@ -506,7 +555,7 @@ def _interp(
                     n_prim_tap[prim_name] = j + 1
                     tap_path = f"{path}{prim_name}[{j}]"
                     for spec in matching:
-                        prim_tap_fn(tap_path, step, tuple(outvals), spec, total)
+                        prim_tap_fn(tap_path, step, tuple(outvals), spec, total, _in_loop)
 
         for v, val in zip(eqn.outvars, outvals):
             env[v] = val

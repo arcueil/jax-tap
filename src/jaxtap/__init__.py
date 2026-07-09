@@ -18,6 +18,11 @@ what crosses the host boundary::
 
     tap.verbose(f, on_step=cb, select=lambda carry: carry[0].mean())
 
+Path-aware select (M1d): if ``select`` accepts a ``path`` kwarg or 2nd positional
+parameter, jaxtap passes the stable node address at call time::
+
+    tap.verbose(f, on_step=cb, select=lambda carry, *, path: {"node": path, "v": carry[0]})
+
 Primitive taps observe named JAX primitives by kind, with zero modification
 to the user's code::
 
@@ -38,6 +43,7 @@ Ergonomic collector helper::
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import sys
 import warnings
 from typing import TYPE_CHECKING, Any, Callable, Sequence
@@ -105,6 +111,13 @@ class PrimitiveTap:
         on-device before the host callback.  Receives a tuple of the primitive's
         output arrays; only the selector's return value crosses the host boundary.
         Default: ``None`` — the full output tuple is delivered as ``TapEvent.value``.
+
+        **Path-aware form** (M1d FIX 3): if the callable accepts a ``path``
+        parameter (keyword or 2nd positional), jaxtap calls
+        ``select(eff_outs, path=path)`` where ``path`` is the primitive tap's
+        stable address (e.g. ``"scan[0]/jit[0]/cholesky[0]"``).  Inspected once
+        at ``verbose()`` time; no per-step overhead.  Single-argument selectors
+        unchanged.
     alert:
         Optional HOST-side predicate called with the (host-side) ``TapEvent.value``.
         When it returns truthy, jaxtap emits one terse line to stderr::
@@ -140,11 +153,19 @@ class PrimitiveTap:
 
     Scope
     -----
-    Primitive taps only fire in code the walker descends into.  Loops filtered by
-    ``ops``/``where``/``max_depth`` are not descended, so primitives inside them
-    are silent.  ``sample_every`` does NOT gate primitive taps (loop-carry taps
-    only).  AD-opaque primitives (``custom_jvp_call``/``custom_vjp_call``
-    interiors) are not descended.
+    The walker ALWAYS descends into scan/while bodies, so primitive taps fire
+    inside loops regardless of ``ops``/``where``/``max_depth`` filtering.
+    Those filters control only whether the loop node EMITS carry taps — they do
+    not suppress prim-tap coverage inside the body.
+    AD-opaque primitives (``custom_jvp_call``/``custom_vjp_call`` interiors)
+    are not descended (v1 policy unchanged).
+
+    ``sample_every`` gates primitive taps inside loops with the same device-side
+    ``lax.cond(step % se == 0, fire, noop)`` pattern as carry taps.  Primitive
+    taps that fire OUTSIDE any loop (``TapEvent.step == -1``) are always ungated
+    regardless of ``sample_every``.  ``once=`` and ``alert`` operate on the
+    events that survive the gate.  For se≥10 the callback cost amortises to
+    ~1 µs/step (see benchmark); se=10 is the recommended monitoring baseline.
 
     Step context
     ------------
@@ -207,6 +228,51 @@ def on(
     return PrimitiveTap(
         prim_name=prim_name, select=select, alert=alert, label=label, output=output, once=once
     )
+
+
+# ---------------------------------------------------------------------------
+# Path-aware select inspection (FIX 3)
+# ---------------------------------------------------------------------------
+
+
+def _accepts_path(fn: "Callable") -> bool:
+    """Return True if ``fn`` accepts ``path`` as a keyword argument or 2nd positional.
+
+    Inspected once at trace time (Python level) when ``verbose()`` is called so
+    the branch is resolved statically — no per-step overhead.
+
+    Accepts:
+    - ``select(leaves, *, path)``  — keyword-only 'path'
+    - ``select(leaves, path)``     — 2nd positional-or-keyword parameter named 'path'
+    - ``select(leaves, path_str)`` — any name works if it is the 2nd positional
+
+    Does NOT accept ``path`` through **kwargs to avoid false positives.
+    Returns False on any introspection failure (e.g. built-in callables).
+    """
+    try:
+        sig = inspect.signature(fn)
+        params = list(sig.parameters.values())
+        # Named 'path' anywhere in the signature (kwarg or positional)
+        if "path" in sig.parameters:
+            param = sig.parameters["path"]
+            # Exclude **kwargs — that would match everything
+            if param.kind != inspect.Parameter.VAR_KEYWORD:
+                return True
+        # 2nd positional parameter (any name) — caller passes path=
+        positional = [
+            p
+            for p in params
+            if p.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        if len(positional) >= 2:
+            return True
+        return False
+    except (ValueError, TypeError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -350,21 +416,34 @@ def verbose(
         traced program before the host callback.  Receives a tuple of carry
         leaves; only the selector's output crosses the host boundary.
         Default: the full carry tuple.
+
+        **Path-aware form** (M1d FIX 3): if the callable accepts a ``path``
+        parameter (either as a keyword argument or as the 2nd positional
+        parameter), jaxtap calls ``select(carry_leaves, path=path)`` where
+        ``path`` is the stable node-address string (e.g. ``"scan[0]"``).
+        This is inspected once at ``verbose()`` call time so there is no
+        per-step overhead.  Back-compat: single-argument selectors are
+        unchanged.
     ops:
         Which control-flow operators to tap.  Accepted values: ``"scan"``,
         ``"while_loop"``.  Default: both.
     sample_every:
         Fire taps only on steps 0, k, 2k, … (device-side gate via
         ``lax.cond``).  Default: 1 (every step).  Must be ≥ 1.
-        Note: ``sample_every`` does NOT gate primitive taps (``taps=``).
+        Gates BOTH carry taps and primitive taps that fire inside a loop.
+        Primitive taps outside any loop (step == -1) are always ungated.
+        At se=10 the callback cost amortises to ~1 µs/step — recommended
+        for semi-production monitoring (see bench/README.md).
     where:
         Optional path predicate: only CF nodes whose path satisfies
-        ``where(path)`` are instrumented.  The address counter advances for
-        filtered-out nodes so addressing remains stable.  Default: all nodes.
+        ``where(path)`` EMIT carry taps.  The address counter advances for
+        filtered-out nodes so addressing remains stable.  The walker still
+        DESCENDS into filtered bodies, so primitive taps and nested carry taps
+        inside them fire normally.  Default: all nodes emit.
     max_depth:
         Optional depth limit.  CF nodes at depth > ``max_depth`` (depth =
-        number of ``/`` segments in the path) are bound opaquely.
-        Default: no limit.
+        number of ``/`` segments in the path) do not emit carry taps.
+        Deeper primitive taps and nested loops still fire.  Default: no limit.
     taps:
         Sequence of :class:`PrimitiveTap` specs created via :func:`on`.  After
         the walker binds any non-boundary primitive whose name matches a spec,
@@ -400,6 +479,11 @@ def verbose(
     internal_ops: frozenset[str] = frozenset(_OP_NAME_MAP[op] for op in ops if op in _OP_NAME_MAP)
 
     if select is not None:
+        # FIX 3: inspect select once at verbose() call time.
+        # If it accepts 'path' (kwarg or 2nd positional), call select(leaves, path=path);
+        # otherwise call select(leaves) for backward compatibility.
+        _select_wants_path: bool = _accepts_path(select)
+
         # tap_cb is called INSIDE the traced computation (scan/while body),
         # so ``select`` runs on-device before the host-boundary crossing.
         # ``total`` is a Python int (or None) passed as a kwarg from the rewrites;
@@ -407,7 +491,10 @@ def verbose(
         def _base_tap_cb(
             path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
         ) -> None:
-            selected = select(carry_leaves)
+            # _select_wants_path is a Python bool: this branch resolves at trace time.
+            selected = (
+                select(carry_leaves, path=path) if _select_wants_path else select(carry_leaves)
+            )
             flat_selected = jax.tree_util.tree_leaves(selected)
             # Capture pytree structure at Python (trace) time for host-side recon.
             sel_tree = jax.tree_util.tree_structure(selected)
@@ -463,11 +550,21 @@ def verbose(
     # created fresh here so each verbose() invocation has its own independent set.
     # Scoped here (not module-global) so the once budget resets on each verbose() call.
     _once_fired: set[int] = set()
+    # FIX 3: precompute per-spec path-awareness flag once at verbose() call time.
+    _spec_path_flags: dict[int, bool] = {}
+    for _spec_item in taps:
+        if _spec_item.select is not None:
+            _spec_path_flags[id(_spec_item)] = _accepts_path(_spec_item.select)
     prim_tap_fn: Callable | None = None
     if taps:
 
         def prim_tap_fn(
-            path: str, step: Any, outvals: tuple, spec: PrimitiveTap, total: "int | None" = None
+            path: str,
+            step: Any,
+            outvals: tuple,
+            spec: PrimitiveTap,
+            total: "int | None" = None,
+            _in_loop: bool = False,
         ) -> None:  # type: ignore[misc]
             # Apply output index selection first (trace-time bounds check).
             if spec.output is not None:
@@ -482,7 +579,11 @@ def verbose(
             else:
                 eff_outs = outvals
             if spec.select is not None:
-                selected = spec.select(eff_outs)
+                # FIX 3: pass path= if the per-tap select accepts it.
+                _pspec_wants_path = _spec_path_flags.get(id(spec), False)
+                selected = (
+                    spec.select(eff_outs, path=path) if _pspec_wants_path else spec.select(eff_outs)
+                )
             else:
                 selected = eff_outs
             flat_selected = jax.tree_util.tree_leaves(selected)
@@ -497,7 +598,18 @@ def verbose(
                 if _spec.alert is not None:
                     _fire_alert(_spec, event, _of)
 
-            jax.debug.callback(_host, step, *flat_selected, ordered=False)
+            # M1d FIX 1: gate primitive taps with sample_every when inside a loop.
+            # Prim taps OUTSIDE any loop (_in_loop=False / step sentinel -1) are
+            # always ungated so they always fire regardless of sample_every.
+            if sample_every > 1 and _in_loop:
+                jax.lax.cond(
+                    step % sample_every == 0,
+                    lambda _: jax.debug.callback(_host, step, *flat_selected, ordered=False),
+                    lambda _: None,
+                    step,
+                )
+            else:
+                jax.debug.callback(_host, step, *flat_selected, ordered=False)
 
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         if kwargs:
