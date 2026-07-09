@@ -27,6 +27,7 @@ For a newcomer, start with this sequence:
 7. **`async_dispatch_compile_blowup.py`** — using event timestamps to locate a boundary
 8. **`backward_pass_vjp_nan.py`** — tapping the differentiated function to see the backward pass
 9. **`vmap_chains_progress.py`** — the vmap duality: one bar for 8 chains, or per-chain telemetry
+10. **`blackjax_warmup_telemetry.py`** — the flagship: a real library's warmup, observed live, unmodified (needs `--with blackjax`)
 
 Each builds on the previous one's concepts, and together they show every major tap class and the patterns they address.
 
@@ -163,6 +164,20 @@ events); `select` on the carry ships batched values → per-chain telemetry
 (80 = 8×10). Same unmodified sampler; `select` picks the face.
 **Tap class:** carry tap under `vmap` (the documented per-lane duality, used
 as a feature).
+
+### ✅ `blackjax_warmup_telemetry.py` — the flagship (real library, zero changes)
+**What it shows:** `blackjax.window_adaptation` tunes NUTS inside a compiled
+scan — a black box until it returns. One `with tap.record(...)` around the
+UNMODIFIED `warmup.run(...)` streams step size, average acceptance, and the
+mass matrix per sampled window, live; the final window cross-checks against
+what warmup actually returned (imm within a few %). "Why did my warmup go
+wrong at step 700?" becomes a data question.
+**Honest note:** the `select` picks carry leaves by index, identified for
+blackjax 1.5 with a one-off diagnostic select — the flat-leaves contract is
+the documented boundary.
+**Tap class:** carry tap on a third-party library's adaptation state
+(`with` form + `select` + `sample_every`). Requires
+`uv run --with blackjax` (blackjax is not a jax-tap dependency).
 
 ## Why this directory exists
 
