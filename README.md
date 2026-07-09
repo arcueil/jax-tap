@@ -43,15 +43,15 @@ rec.df()    # step-indexed telemetry → pandas
 Done testing? Delete the `with` line. Nothing else changes — because nothing
 else was ever touched.
 
-*(The `with` form is landing in M1b — see Status. Today the same power is
-available by wrapping the callable: `g, rec = tap.record(f)`.)*
+The `with` form is shipped and ready to use. (The original wrapping API
+`g, rec = tap.record(f)` is also available if you prefer.)
 
 ## What you can tap
 
 | Tap class | What it observes | Status |
 |-----------|------------------|--------|
 | **Control-flow / carry taps** | the mutating carry at every `scan`/`while` step, at any nesting depth, with stable addresses (`scan[0]/while[1]`) | ✅ shipped |
-| **Primitive taps** — *"just define L"* | outputs of named primitives (`tap.on("cholesky", ...)`): your body just writes `L = jnp.linalg.cholesky(M)`; the tap observes the actual `L` by primitive *kind* | 🔨 in progress (M1a) |
+| **Primitive taps** — *"just define L"* | outputs of named primitives (`tap.on("cholesky", ...)`): your body just writes `L = jnp.linalg.cholesky(M)`; the tap observes the actual `L` by primitive *kind* | ✅ shipped |
 | Trace-time taps | shapes/dtypes/retrace events, at trace time, zero runtime cost | 🗺 roadmap |
 | jit-event taps | trace-vs-execute timestamps ("why is this recompiling / where did 400 s go") | 🗺 roadmap |
 | Backward-pass values | NaNs that exist only in the gradient pass | 🚫 documented boundary — grad-transform territory, out of scope by design |
@@ -96,6 +96,122 @@ rec.df()                                             # path | step | c
 tap.verbose(f, on_step=cb, sample_every=100, max_depth=1, where=lambda p: "while" in p)
 ```
 
+## The debugging toolkit
+
+jax-tap ships four ergonomic helpers for the most common debugging patterns.
+
+### Watch for NaNs: `tap.watch_nan()`
+
+The most common trap: a primitive silently produces a non-finite output, and
+your loop looks converged even though it has frozen or is computing garbage.
+`tap.watch_nan("prim_name")` creates a tap that alerts **live** the moment a
+NaN or Inf appears:
+
+```python
+with tap.record(taps=[tap.watch_nan("cholesky", once=True)]) as rec:
+    result = sampler(x0, n_steps)   # your code, unmodified
+```
+
+Output (to stderr, live):
+```
+[tap] FAIL scan[0]/jit[0]/cholesky[0] 7/25: NaN/Inf
+```
+
+The `once=True` argument fires the alert only once per run — useful when a
+single occurrence matters and you want to suppress the flood of repeated lines
+for every subsequent step.
+
+### Print values: `tap.print()`
+
+For one-line diagnostic output of a primitive's values, `tap.print()` streams
+to stderr with truncated array formatting:
+
+```python
+with tap.record(taps=[tap.print("mul")]) as rec:
+    result = f(x0, xs)
+```
+
+Output (to stderr, one line per primitive firing):
+```
+[tap] scan[0]/mul[0] 0/5: array([0.], dtype=float32)
+[tap] scan[0]/mul[0] 1/5: array([0.8499], dtype=float32)
+[tap] scan[0]/mul[0] 2/5: array([1.7768], dtype=float32)
+```
+
+Arrays are printed with `numpy.printoptions(precision=4, threshold=8, edgeitems=2)`
+so large arrays truncate cleanly without flooding your terminal.
+
+### Custom alerts and selectors: `tap.on()`
+
+For fine-grained control, `tap.on()` combines a device-side `select` reducer
+(to minimize host-boundary traffic) with a host-side `alert` predicate:
+
+```python
+with tap.record(
+    taps=[
+        tap.on(
+            "sin",
+            select=lambda outs: outs[0],    # device-side: extract first output
+            alert=lambda v: v > 0.8,        # host-side: when to alert
+            label="sin exceeded 0.8"        # label shown in [tap] FAIL line
+        )
+    ]
+) as rec:
+    result = f(x0, xs)
+```
+
+Output (to stderr, only when the alert predicate is truthy):
+```
+[tap] FAIL scan[0]/sin[0] 1/5: sin exceeded 0.8
+[tap] FAIL scan[0]/sin[0] 2/5: sin exceeded 0.8
+```
+
+### Discover primitive names: `tap.primitives()`
+
+Unsure which primitive you want to tap? `tap.primitives(f, *args)` traces the
+function once (with `jax.make_jaxpr`) and returns a dict of all primitives:
+
+```python
+prims = tap.primitives(f, x0, xs)
+# {'scan': 1, 'mul': 1, 'sin': 1, 'convert_element_type': 1, 'add': 1}
+```
+
+Pass any string you see as the `prim_name` argument to `tap.on()`, `tap.print()`,
+or `tap.watch_nan()`.
+
+### A gotcha: `output=` index matches JAX primitive order, not Python API order
+
+When tapping a primitive with multiple outputs, **indices refer to the JAX
+primitive's output order, which can differ from the Python API's return order.**
+
+For example, `jnp.linalg.eigh` returns `(eigenvalues, eigenvectors)` in Python,
+but the underlying primitive emits `(eigenvectors, eigenvalues)` — so `output=0`
+gives eigenvectors, not eigenvalues. Before relying on a specific `output=` index,
+use `tap.print(prim_name)` (without an index) to inspect the actual layout.
+
+### Emergency recovery: `tap.emergency_restore()`
+
+If a session crashes inside a `tap.record()` block, the monkey-patched
+`jax.lax.scan` and `jax.lax.while_loop` may not be restored. Call
+`tap.emergency_restore()` to reset the library state to a clean slate.
+
+## Progress bar in four lines
+
+jax-tap ships no display frontends — display is the consumer's responsibility.
+To add a progress bar, wire a simple `on_step` callback that updates your bar
+when the enclosing loop fires:
+
+```python
+from tqdm import tqdm
+bar = tqdm(total=1000)
+with tap.record(on_step=lambda e: e.path == "scan[0]" and bar.update(1)):
+    run(...)
+```
+
+The `sample_every=` parameter is your rate-limiting knob: pass it to `tap.record()`
+to emit events only every *k* steps, reducing host-boundary traffic if your loop is
+very tight.
+
 ## demo/ — real bugs, re-run against the tap promise
 
 `demo/` holds one runnable file per real bug from our own history (silent
@@ -115,8 +231,10 @@ re-reviewed — evidence frozen under `proofs/`).
 | M0 | jaxpr-walker core (`tap.verbose`) | ✅ merged |
 | M2 | tap specs (`sample_every`/`where`/`max_depth`) + collectors (`record`, `.df()`, JSONL) | ✅ merged |
 | B-core review | 2-arm adversarial review + remediation | ✅ merged |
-| M1a | primitive taps (`tap.on("cholesky", ...)`) | 🔨 in progress |
-| M1b | the `with tap.record():` context form | next (own adversarial review) |
+| M1a | primitive taps (`tap.on("cholesky", ...)`) | ✅ merged |
+| M1b | the `with tap.record():` context form | ✅ merged |
+| A-shell review | adversarial review of A-form context-manager semantics | ✅ merged |
+| M1c | alert sugar (`watch_nan`, `tap.print`, `output=`, `once=`) | ✅ merged |
 | M3/M4/M5 | conformance suite · demos · docs | queued |
 
 ## Naming
