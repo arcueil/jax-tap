@@ -32,21 +32,31 @@ CRITICAL: The self-normalizing property only holds at full N (≥10,000 steps).
 At small N (smoke mode, N=100), trace/dispatch overhead does not amortize and
 machinery numbers are ~7× inflated and not comparable; smoke mode is report-only.
 
-Rationale for the 15.0 µs threshold:
-  - Current machinery ≈ 8.2 µs (post perf/emission-machinery)
-  - Known int()-regression class measured 21 µs
-  - 15 µs catches structural regressions while tolerating shared-runner noise
-  - Absolute floor numbers (machinery near 0) are REPORTED, never gated
+Machine-Dependent Threshold (Absolute µs) vs Machine-Independent (Ratio)
+------------------------------------------------------------------------
+Early iteration used absolute threshold (15 µs) but machinery is Python host
+work, so it scales with CPU speed: on ubuntu-latest runner (JAX head), both
+manual-payload and machinery scale ~2.3×. However, the RATIO machinery/floor
+is machine-independent:
+
+  - Workstation (this machine): machinery 7.6 µs, floor 52.7 µs, ratio 0.145
+  - CI runner (ubuntu-latest): machinery 17.6 µs, floor 120.3 µs, ratio 0.147
+  - Known int()-regression class: ratio 0.40
+
+Gate on RATIO (threshold 0.25) sits between healthy (0.145–0.147) and
+regression class (0.40), with machine independence and shared-runner robustness.
+Absolute µs are REPORTED in the table for diagnostics (varies by hardware),
+but the gate decision uses ratio only.
 
 Usage
 -----
-  uv run python bench/nightly_gate.py           # full run (~5-10 s)
-  uv run python bench/nightly_gate.py --smoke   # quick check (<2 s, N=100)
+  uv run python bench/nightly_gate.py           # full run (~5-10 s), gates on ratio
+  uv run python bench/nightly_gate.py --smoke   # quick check (<2 s, N=100), report-only
 
 Environment
 -----------
-  JAXTAP_BENCH_GATE_US      — override machinery threshold (default: 15.0)
-  GITHUB_STEP_SUMMARY       — append table to GitHub Actions job summary
+  JAXTAP_BENCH_GATE_RATIO    — override machinery/floor ratio threshold (default: 0.25)
+  GITHUB_STEP_SUMMARY        — append table to GitHub Actions job summary
 """
 
 from __future__ import annotations
@@ -137,8 +147,9 @@ def print_results(
     manual_payload_us: float,
     verbose_us: float,
     machinery_us: float,
+    ratio: float,
     passed: bool,
-    threshold_us: float,
+    threshold_ratio: float,
 ) -> str:
     """Generate markdown table for output."""
     status = "✓ PASS" if passed else "✗ FAIL"
@@ -147,13 +158,14 @@ def print_results(
     lines.append("")
     lines.append("## Machinery Regression Gate")
     lines.append("")
-    lines.append("| Arm | µs/step |")
-    lines.append("|-----|---------|")
-    lines.append(f"| manual-payload | {manual_payload_us:.3f} |")
-    lines.append(f"| verbose(se=1) | {verbose_us:.3f} |")
-    lines.append(f"| **MACHINERY** | **{machinery_us:.3f}** |")
+    lines.append("| Metric | Value |")
+    lines.append("|--------|-------|")
+    lines.append(f"| manual-payload (µs/step) | {manual_payload_us:.3f} |")
+    lines.append(f"| verbose(se=1) (µs/step) | {verbose_us:.3f} |")
+    lines.append(f"| machinery (µs/step) | {machinery_us:.3f} |")
+    lines.append(f"| **ratio (machinery/floor)** | **{ratio:.4f}** |")
     lines.append("")
-    lines.append(f"Threshold: {threshold_us:.1f} µs/step")
+    lines.append(f"Threshold ratio: {threshold_ratio:.2f}")
     lines.append(f"Status: {status}")
     lines.append("")
 
@@ -178,8 +190,8 @@ def main() -> None:
         N = 10_000
         K = 5
 
-    # Get threshold from environment or use default
-    threshold_us = float(os.environ.get("JAXTAP_BENCH_GATE_US", "15.0"))
+    # Get ratio threshold from environment or use default (0.25)
+    threshold_ratio = float(os.environ.get("JAXTAP_BENCH_GATE_RATIO", "0.25"))
 
     print(
         f"jax {jax.__version__} | device: {jax.devices()[0]}",
@@ -187,7 +199,7 @@ def main() -> None:
         flush=True,
     )
     print(
-        f"N={N:,} | K={K} | threshold={threshold_us:.1f} µs",
+        f"N={N:,} | K={K} | threshold_ratio={threshold_ratio:.2f}",
         file=sys.stderr,
         flush=True,
     )
@@ -216,12 +228,20 @@ def main() -> None:
         flush=True,
     )
 
-    # Determine pass/fail
-    passed = machinery_us <= threshold_us
+    # Compute ratio (machine-independent metric)
+    ratio = machinery_us / manual_payload_us if manual_payload_us > 0 else 0.0
+    print(
+        f"  RATIO:          {ratio:.4f} (machinery/floor)",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    # Determine pass/fail based on ratio
+    passed = ratio <= threshold_ratio
 
     # Generate and print output
     output = print_results(
-        manual_payload_us, verbose_us, machinery_us, passed, threshold_us
+        manual_payload_us, verbose_us, machinery_us, ratio, passed, threshold_ratio
     )
     print(output)
 
@@ -247,13 +267,13 @@ def main() -> None:
         sys.exit(0)
     elif passed:
         print(
-            f"\n✓ Machinery {machinery_us:.3f} µs ≤ {threshold_us:.1f} µs threshold",
+            f"\n✓ Ratio {ratio:.4f} ≤ {threshold_ratio:.2f} threshold",
             file=sys.stderr,
         )
         sys.exit(0)
     else:
         print(
-            f"\n✗ REGRESSION: Machinery {machinery_us:.3f} µs > {threshold_us:.1f} µs threshold",
+            f"\n✗ REGRESSION: Ratio {ratio:.4f} > {threshold_ratio:.2f} threshold",
             file=sys.stderr,
         )
         sys.exit(1)
