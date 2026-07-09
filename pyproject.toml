@@ -23,7 +23,7 @@ packages = ["src/jaxtap"]
 pandas = ["pandas"]
 
 [dependency-groups]
-dev = ["pytest", "ruff", "mypy", "pre-commit"]
+dev = ["pytest", "ruff", "mypy", "pre-commit", "pandas"]
 
 [tool.ruff]
 line-length = 88

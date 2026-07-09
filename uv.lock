@@ -148,6 +148,7 @@ pandas = [
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
+    { name = "pandas" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "ruff" },
@@ -163,6 +164,7 @@ provides-extras = ["pandas"]
 [package.metadata.requires-dev]
 dev = [
     { name = "mypy" },
+    { name = "pandas" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "ruff" },
