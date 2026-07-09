@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-07-09)
 
 - **Carry-tap alerts**: `alert=` / `alert_once=` on `tap.verbose` and
   `tap.record` — host-side tripwires on carry events with the standard terse
