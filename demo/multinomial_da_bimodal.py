@@ -1,3 +1,17 @@
+# Copyright 2026 The jax-tap Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """The acceptance statistic that was secretly bimodal.
 
 BUG: a step-size controller (dual-averaging) tunes toward a target MEAN
@@ -88,10 +102,14 @@ def main() -> None:
     mid_frac = sum(counts[1:-1]) / len(acc)
     bimodal = lo_frac > 0.1 and hi_frac > 0.5 and mid_frac < 0.02
     mean_near = abs(mean_acc - TARGET) < 0.25
-    print(f"\nRESULT: bimodality visible on sight from the tapped stream "
-          f"[{'PASS' if bimodal else 'FAIL'}]")
-    print(f"        while the mean looked plausible ({mean_acc:.2f}) and eps swung {swing:.1f}x "
-          f"[{'PASS' if mean_near and swing > 1.5 else 'FAIL'}]")
+    print(
+        f"\nRESULT: bimodality visible on sight from the tapped stream "
+        f"[{'PASS' if bimodal else 'FAIL'}]"
+    )
+    print(
+        f"        while the mean looked plausible ({mean_acc:.2f}) and eps swung {swing:.1f}x "
+        f"[{'PASS' if mean_near and swing > 1.5 else 'FAIL'}]"
+    )
 
 
 if __name__ == "__main__":

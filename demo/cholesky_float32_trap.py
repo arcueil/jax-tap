@@ -1,3 +1,17 @@
+# Copyright 2026 The jax-tap Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """The float32 Cholesky trap.
 
 BUG: a float32 Cholesky silently produces a non-finite factor once the matrix
@@ -59,17 +73,21 @@ def run_demo(x64: bool):
 def main() -> None:
     print("float32:", end=" ")
     final32, bad32 = run_demo(x64=False)
-    print(f"loop 'completed' (frozen log-step {final32:.1f}); "
-          f"tap caught first bad cholesky at step {bad32}/25 (live line above)")
+    print(
+        f"loop 'completed' (frozen log-step {final32:.1f}); "
+        f"tap caught first bad cholesky at step {bad32}/25 (live line above)"
+    )
 
     print("float64:", end=" ")
     final64, bad64 = run_demo(x64=True)
-    print("no non-finite step — the trap is float32-specific"
-          if bad64 is None else f"bad at {bad64}??")
+    print(
+        "no non-finite step — the trap is float32-specific"
+        if bad64 is None
+        else f"bad at {bad64}??"
+    )
 
     ok = bad32 is not None and bad64 is None
-    print(f"\nRESULT: silent NaN localized live, zero code changes "
-          f"[{'PASS' if ok else 'FAIL'}]")
+    print(f"\nRESULT: silent NaN localized live, zero code changes [{'PASS' if ok else 'FAIL'}]")
 
 
 if __name__ == "__main__":

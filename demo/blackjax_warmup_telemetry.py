@@ -1,3 +1,17 @@
+# Copyright 2026 The jax-tap Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Watch a real BlackJAX warmup adapt — with zero changes to BlackJAX.
 
 WHAT THIS SHOWS: the flagship use case. `blackjax.window_adaptation` tunes a
@@ -28,8 +42,9 @@ import jaxtap as tap
 try:
     import blackjax
 except ImportError:
-    print("this demo needs blackjax:  uv run --with blackjax python "
-          "demo/blackjax_warmup_telemetry.py")
+    print(
+        "this demo needs blackjax:  uv run --with blackjax python demo/blackjax_warmup_telemetry.py"
+    )
     sys.exit(0)
 
 N_STEPS = 600
@@ -51,14 +66,13 @@ def adaptation_view(leaves, path=None):
     matrix diagonal. Computed on-device; only these values cross to host."""
     if path != "scan[0]":
         return ()
-    return {"step_size": leaves[12],
-            "acc_avg": TARGET_ACC - leaves[6],
-            "imm": leaves[13]}
+    return {"step_size": leaves[12], "acc_avg": TARGET_ACC - leaves[6], "imm": leaves[13]}
 
 
 def main() -> None:
-    warmup = blackjax.window_adaptation(blackjax.nuts, logdensity,
-                                        target_acceptance_rate=TARGET_ACC)
+    warmup = blackjax.window_adaptation(
+        blackjax.nuts, logdensity, target_acceptance_rate=TARGET_ACC
+    )
     key = jax.random.key(0)
 
     # ╔═ jax-tap virtual injection ════════════════════════════════════════╗
@@ -74,30 +88,34 @@ def main() -> None:
     rows = sorted((e for e in rec.events if e.path == "scan[0]"), key=lambda e: e.step)
     for e in rows:
         v = e.value
-        print(f"  {e.step:>5}  {float(v['step_size']):>9.3f}  "
-              f"{float(v['acc_avg']):>7.2f}  "
-              f"[{float(v['imm'][0]):.3f}, {float(v['imm'][1]):.3f}]")
+        print(
+            f"  {e.step:>5}  {float(v['step_size']):>9.3f}  "
+            f"{float(v['acc_avg']):>7.2f}  "
+            f"[{float(v['imm'][0]):.3f}, {float(v['imm'][1]):.3f}]"
+        )
 
     # cross-check the tapped stream against what warmup actually returned
     final = results.parameters
     ret_ss = float(final["step_size"])
     ret_imm = [float(x) for x in final["inverse_mass_matrix"]]
     last = rows[-1].value
-    print(f"\nwarmup returned: step_size {ret_ss:.3f}, imm "
-          f"[{ret_imm[0]:.3f}, {ret_imm[1]:.3f}]")
-    print(f"tap's last window saw:      {float(last['step_size']):.3f}, imm "
-          f"[{float(last['imm'][0]):.3f}, {float(last['imm'][1]):.3f}]")
+    print(f"\nwarmup returned: step_size {ret_ss:.3f}, imm [{ret_imm[0]:.3f}, {ret_imm[1]:.3f}]")
+    print(
+        f"tap's last window saw:      {float(last['step_size']):.3f}, imm "
+        f"[{float(last['imm'][0]):.3f}, {float(last['imm'][1]):.3f}]"
+    )
 
     # Cross-check semantics: the DA step size is a smooth AVERAGE -> tight
     # tolerance; the mass matrix updates at WINDOW BOUNDARIES, and the final
     # update can land after the last sampled step -> same-ballpark tolerance
     # (the stream shows the adaptation PATH; the return is its endpoint).
     ss_ok = abs(float(last["step_size"]) - ret_ss) / ret_ss < 0.15
-    imm_ok = all(0.5 < float(last["imm"][i]) / max(ret_imm[i], 1e-6) < 2.0
-                 for i in range(2))
+    imm_ok = all(0.5 < float(last["imm"][i]) / max(ret_imm[i], 1e-6) < 2.0 for i in range(2))
     ok = len(rows) >= 4 and ss_ok and imm_ok
-    print(f"\nRESULT: adaptation observed live inside an unmodified blackjax warmup "
-          f"[{'PASS' if ok else 'FAIL'}]")
+    print(
+        f"\nRESULT: adaptation observed live inside an unmodified blackjax warmup "
+        f"[{'PASS' if ok else 'FAIL'}]"
+    )
 
 
 if __name__ == "__main__":

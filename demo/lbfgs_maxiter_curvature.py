@@ -1,3 +1,17 @@
+# Copyright 2026 The jax-tap Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """The inner loop that quit early.
 
 BUG: an inner optimizer buried inside an outer sampling loop hits its
@@ -96,24 +110,25 @@ def main() -> None:
         last = e
     exits.append(last)
 
-    print(f"inner-solver exit state per outer step (cap={MAXITER}, path "
-          f"{beats[0].path}):")
+    print(f"inner-solver exit state per outer step (cap={MAXITER}, path {beats[0].path}):")
     capped = 0
     for t, e in enumerate(exits):
         hit = e.value["it"] >= MAXITER and e.value["g"] > TOL
         capped += bool(hit)
         flag = "  <-- hit cap, NOT converged (silent)" if hit else ""
-        print(f"  outer {t:>2}: {int(e.value['it']):>2} iters, "
-              f"|grad| {float(e.value['g']):>7.3f}{flag}")
+        print(
+            f"  outer {t:>2}: {int(e.value['it']):>2} iters, "
+            f"|grad| {float(e.value['g']):>7.3f}{flag}"
+        )
 
-    print(f"\nstep size: healthy {float(eps[0]):.3f} -> collapsed "
-          f"{float(eps.min()):.6f}  ({float(eps[0] / eps.min()):.0f}x smaller, "
-          f"all values finite, no warning anywhere)")
+    print(
+        f"\nstep size: healthy {float(eps[0]):.3f} -> collapsed "
+        f"{float(eps.min()):.6f}  ({float(eps[0] / eps.min()):.0f}x smaller, "
+        f"all values finite, no warning anywhere)"
+    )
 
-    ok = (len(exits) == N_OUTER and capped == 2
-          and any(e.value["it"] < MAXITER for e in exits[:4]))
-    print(f"\nRESULT: silent maxiter exits localized at their address "
-          f"[{'PASS' if ok else 'FAIL'}]")
+    ok = len(exits) == N_OUTER and capped == 2 and any(e.value["it"] < MAXITER for e in exits[:4])
+    print(f"\nRESULT: silent maxiter exits localized at their address [{'PASS' if ok else 'FAIL'}]")
 
 
 if __name__ == "__main__":

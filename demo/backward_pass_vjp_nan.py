@@ -1,3 +1,17 @@
+# Copyright 2026 The jax-tap Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """The NaN that exists only in the backward pass.
 
 BUG: a hand-rolled distance ``sqrt(c**2 + x**2)`` is perfectly finite forward
@@ -55,12 +69,15 @@ def main() -> None:
     # ---------------- act 1: the honest boundary ----------------
     buf = io.StringIO()
     with redirect_stderr(buf):
-        watched = tap.verbose(loss, on_step=lambda e: None,
-                              taps=[tap.watch_nan("sqrt"), tap.watch_nan("mul")])
+        watched = tap.verbose(
+            loss, on_step=lambda e: None, taps=[tap.watch_nan("sqrt"), tap.watch_nan("mul")]
+        )
         jax.block_until_ready(watched(theta))
     fwd_silent = "FAIL" not in buf.getvalue()
-    print(f"\nact 1 — forward taps on loss():        "
-          f"{'SILENT (forward is clean; the tap CANNOT see this bug)' if fwd_silent else 'fired?!'}")
+    print(
+        f"\nact 1 — forward taps on loss():        "
+        f"{'SILENT (forward is clean; the tap CANNOT see this bug)' if fwd_silent else 'fired?!'}"
+    )
 
     # ---------------- act 2: the escape hatch ----------------
     # How this works, end to end (the backend in 4 steps):
@@ -79,15 +96,20 @@ def main() -> None:
     # forward pass; here the tap wraps the differentiated program itself.
     caught = io.StringIO()
     with redirect_stderr(caught):
-        jax.block_until_ready(tap.verbose(jax.grad(loss), on_step=lambda e: None,
-                                          taps=[tap.watch_nan("div", once=True)])(theta))
-    line = next((l for l in caught.getvalue().splitlines() if "FAIL" in l), "")
+        jax.block_until_ready(
+            tap.verbose(
+                jax.grad(loss), on_step=lambda e: None, taps=[tap.watch_nan("div", once=True)]
+            )(theta)
+        )
+    line = next((s for s in caught.getvalue().splitlines() if "FAIL" in s), "")
     print(f"act 2 — tap the DIFFERENTIATED function:\n  {line}")
     print("  -> the backward NaN, at its birth site, with an address and step.")
 
     ok = fwd_silent and (grd != grd) and "div" in line and "scan[0]" in line
-    print(f"\nRESULT: boundary proven (forward taps blind) AND escape hatch works "
-          f"(tap grad(f) itself) [{'PASS' if ok else 'FAIL'}]")
+    print(
+        f"\nRESULT: boundary proven (forward taps blind) AND escape hatch works "
+        f"(tap grad(f) itself) [{'PASS' if ok else 'FAIL'}]"
+    )
 
 
 if __name__ == "__main__":
