@@ -15,17 +15,30 @@
 """
 bench/a1_decompose.py — Decompose the A1 mitigation per-callback overhead.
 
-AYS-1 response: three micro-experiments to attribute the +13 µs/iter overhead.
+Identifies the root cause of the per-iteration overhead and documents the
+shipped fix (sign-encode, arm (e)).
 
-Baseline (B0): while_loop, carry tap ships step + DIM leaves (no A1 arg).
-(a) +1 dummy scalar: ships step + DIM leaves + active bool; host uses args[-1]
-    via indexing (no star-unpack list, no .item() call) — isolates arg-shipping.
-(b) +.item() call: ships step + DIM leaves + active bool; host uses args[-1].item()
-    via index (no star-unpack list) — adds .item() cost on top of (a).
-(c) full unpack: ships step + DIM leaves + active bool; host does
-    ``*leaves, active_ = leaves_and_active`` + ``tuple(leaves)`` — current A1 impl.
-(d) active-FIRST restructure: ships step + active + DIM leaves; host uses named
-    positional args ``(step_, active_, *leaves)`` — no list allocation.
+Arms (in order):
+  B0 — no-tap baseline: pure XLA while_loop with no debug.callback.
+  B1 — baseline-tap (no A1): original verbose() path, step + DIM leaves shipped.
+  (a) +1 dummy scalar, index-only: adds one extra bool arg; host uses args[-1]
+      via index with ZERO logic change — isolates the XLA arg-shipping cost.
+  (b) +.item() call, index-based: arm (a) plus active_.item() call — isolates
+      the .item() call cost.
+  (c) full unpack (*leaves, active_): active at end, star-unpack creates a Python
+      list, tuple(leaves) converts back — the naive A1 extra-arg approach.
+  (d) active-FIRST restructure: active as first positional arg after step — avoids
+      list allocation but shipping cost still dominates.
+  (e) sign-encode (SHIPPED): real steps ≥ 0; ghost lanes ship -(step+1) < 0.
+      Same arg count as B1 — no extra shipping cost. Host sign-checks and drops.
+
+Key findings:
+  (a) shows that arg-shipping alone costs ~16-19 µs/iter — this is the dominant
+  term, not the Python-level unpack. lax.cond(active, tap, noop) was considered
+  but does NOT work under vmap: a per-lane predicate causes lax.cond to evaluate
+  BOTH branches for all lanes; debug.callback fires unconditionally regardless of
+  the predicate (fundamental JAX vmap+effects semantics). The sign-encode arm (e)
+  eliminates the extra operand, reducing overhead to ~4-8 µs/iter.
 
 All arms use a while_loop with a DIM=8 float32 carry + int32 counter.
 Trip count fixed at N=2000; K=25 repeats for stable medians.

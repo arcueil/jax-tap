@@ -738,6 +738,69 @@ def test_vmap_while_alert_no_ghost_alerts():
     )
 
 
+def test_vmap_while_carry_sample_every_no_corruption():
+    """sign-encode doesn't corrupt sample_every gate or leak ghost values.
+
+    Two lanes: start values [0.0, 8.0], LIM=10.0.
+      - Lane 0: 10 real iterations (joint steps 0-9).
+      - Lane 1: 2 real iterations (joint steps 0-1), then ghost from step 2.
+    joint while_loop runs max(10, 2) = 10 joint steps.
+
+    Code invariant: the sample_every gate ``lax.cond(step % k == 0, _uncapped, noop, step)``
+    operates on ``step`` (the real joint counter, always >=0).  Sign-encoding of the
+    active mask happens INSIDE ``_uncapped``, AFTER the gate has already fired — so the
+    gate arithmetic cannot be corrupted by sign-encode.
+
+    Known boundary: under jax.vmap + while_loop, JAX's batching rule broadcasts the
+    scalar joint step counter to per-lane shape (B,) in the batched carry.  This makes
+    ``step % k == 0`` a per-lane bool, triggering lax.cond's "evaluate both branches"
+    behaviour — the debug.callback fires for all real iterations regardless of sample_every.
+    This is a pre-existing JAX vmap+lax.cond+effects limitation, NOT introduced by sign-encode.
+
+    What this test freezes:
+      1. All delivered step values are non-negative (sign-encode never leaks negative raw).
+      2. No ghost values are delivered (sign-encode drops all ghost lanes host-side).
+      3. The event count equals the total real iterations (10 + 2 = 12) — sample_every
+         does not suppress under vmap+while (see boundary above).
+      4. Output is bitwise-identical.
+    """
+    _v0_se = jnp.array([0.0, 8.0], dtype=jnp.float32)
+    _lim_se = jnp.float32(10.0)
+
+    def _f(v0):
+        return jax.lax.while_loop(
+            lambda c: c < _lim_se,
+            lambda c: c + jnp.float32(1.0),
+            v0,
+        )
+
+    events: list = []
+    got = jax.vmap(tap.verbose(_f, on_step=events.append, sample_every=2))(_v0_se)
+    jax.block_until_ready(got)
+
+    while_events = [e for e in events if e.path == "while[0]"]
+    steps = [e.step for e in while_events]
+    carry_vals = [float(e.value[0]) for e in while_events]
+
+    # 1. All delivered steps non-negative: sign-encode never leaks -(step+1) to host.
+    bad_steps = [s for s in steps if s < 0]
+    assert not bad_steps, (
+        f"sign-encode corruption: negative raw step values reached host: {bad_steps}"
+    )
+    # 2. No ghost values: carry must not exceed LIM (ghosts produce carry > LIM).
+    max_carry = max(carry_vals)
+    assert max_carry <= float(_lim_se), (
+        f"ghost leak: max carry {max_carry} > {float(_lim_se)}"
+    )
+    # 3. Event count == 12 (all real iterations; sample_every doesn't suppress under
+    #    vmap+while due to lax.cond+effects boundary — see docstring).
+    assert len(while_events) == 12, (
+        f"expected 12 real events (10+2 lanes), got {len(while_events)}"
+    )
+    # 4. Bitwise-identical output.
+    np.testing.assert_array_equal(got, np.array([10.0, 10.0]))
+
+
 def test_vmap_while_prim_tap_residual_ghost():
     """Primitive taps inside a vmapped while body STILL ghost-fire (known boundary).
 

@@ -655,10 +655,18 @@ def verbose(
     **vmap × while_loop carry taps**: when ``f`` contains a ``while_loop``
     and is wrapped in ``jax.vmap``, carry taps deliver exactly one event per
     real per-lane iteration (not one per joint iteration).  jaxtap re-evaluates
-    the while cond inside the body to compute a per-lane active mask and gates
-    the carry tap with a device-side ``lax.cond(active, tap, noop)`` — ghost
-    lanes never fire ``debug.callback`` at all, so ``on_step`` and ``alert``
-    only see events from lanes where the cond was still True.
+    the while cond inside the body to compute a per-lane active mask, then
+    sign-encodes it into the step argument: real iterations ship ``step`` as-is
+    (non-negative); ghost lanes from finished vmap lanes ship ``-(step+1)``
+    (always negative).  The host closure checks the sign and drops ghosts before
+    constructing ``TapEvent`` — so ``on_step`` and ``alert`` only see events
+    from lanes where the cond was still True.
+
+    Note: ``lax.cond(active, tap, noop)`` was considered but does **not** work
+    under ``vmap`` — a per-lane predicate causes ``lax.cond`` to evaluate both
+    branches for all lanes; ``debug.callback`` fires unconditionally regardless
+    of the predicate (fundamental JAX vmap+effects semantics).  The sign-encode
+    host-drop is the correct mechanism.
 
     **Residual prim-tap ghost-firing**: primitive taps (``taps=[tap.on(...)]``)
     inside a vmapped while body still fire for all joint iterations, including
@@ -732,7 +740,8 @@ def verbose(
             # None, we encode active into the step arg using the sign bit: real steps
             # ship as-is (non-negative); ghost lanes ship -(step+1) (always negative).
             # The host decodes: raw<0 means ghost → drop silently.  This avoids the
-            # ~15 µs/iter overhead of shipping an extra callback arg.
+            # ~16-19 µs/iter overhead of shipping one extra scalar operand through
+            # debug.callback (measured in bench/a1_decompose.py arm (a), N=2000 K=25).
             def _base_tap_cb(
                 path: str,
                 step: Any,
@@ -753,6 +762,7 @@ def verbose(
                 if _while_active is not None:
                     # A1 mitigation: encode active into the step sign bit so no extra
                     # callback arg is needed.  ghost lane → step becomes -(step+1).
+                    # INT32_MAX bound: -(step+1) overflows at step == 2^31-1; unreachable.
                     active_step = jax.lax.select(
                         _while_active, step, -(step + jnp.int32(1))
                     )
@@ -806,6 +816,7 @@ def verbose(
             ) -> None:
                 if _while_active is not None:
                     # A1 mitigation: sign-encode active into step; no extra callback arg.
+                    # INT32_MAX bound: -(step+1) overflows at step == 2^31-1; unreachable.
                     active_step = jax.lax.select(
                         _while_active, step, -(step + jnp.int32(1))
                     )

@@ -198,8 +198,8 @@ def rewrite_while(
         # step argument as a SIGN BIT before shipping to debug.callback: real
         # steps arrive non-negative; ghost steps arrive as -(step+1) < 0.  The
         # host checks the sign and drops ghosts before constructing TapEvent.
-        # This avoids the ~16 µs/iter overhead of shipping an extra boolean arg
-        # through debug.callback (measured in bench/a1_decompose.py).
+        # This avoids the ~16-19 µs/iter overhead of shipping one extra scalar
+        # operand through debug.callback (bench/a1_decompose.py arm (a), N=2000).
         #
         # NOTE: lax.cond(active, tap_cb, noop) does NOT work here — under vmap
         # a per-lane predicate causes lax.cond to evaluate BOTH branches for all
