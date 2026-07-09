@@ -137,8 +137,44 @@ print(
     f"  verbose empty-payload machinery:         {empty - mstep:.3f} µs above manual-progress"
 )
 print(f"  empty-payload saving vs full-carry:      {full - empty:.3f} µs at se=1")
+
+# ---------------------------------------------------------------------------
+# Skip-unflatten fast-path: measure the SPECIFIC hypothesis.
+#
+# The hypothesis: add a code branch `if not flat_vals: value = ()` in the
+# select-branch _host closure, skipping tree_unflatten(empty_tree, []).
+# This is the ACTUAL code fast-path, distinct from the data-transfer saving.
+# ---------------------------------------------------------------------------
 print()
-print("Interpretation:")
-print("  If the saving is < 1 µs at se=1, the claim 'no gain for common case'")
-print("  is CONFIRMED (select=() at se=1 is not worth special-casing).")
-print("  At se>=10 the amortization makes the per-step saving even smaller.")
+print("--- Skip-unflatten fast-path hypothesis (the specific code change) ---")
+_K = 9
+_N_CALLS = 100_000
+_empty_tree = jax.tree_util.tree_structure(())
+_empty_flat: list = []
+
+# Cost of tree_unflatten with empty pytree
+_times_unflatten = []
+for _ in range(_K):
+    _t0 = time.perf_counter()
+    for _ in range(_N_CALLS):
+        _ = jax.tree_util.tree_unflatten(_empty_tree, _empty_flat)
+    _times_unflatten.append(time.perf_counter() - _t0)
+cost_unflatten = statistics.median(_times_unflatten) / _N_CALLS * 1e6
+
+# Cost of direct value = () assignment (the fast path)
+_times_skip = []
+for _ in range(_K):
+    _t0 = time.perf_counter()
+    for _ in range(_N_CALLS):
+        _ = ()
+    _times_skip.append(time.perf_counter() - _t0)
+cost_skip = statistics.median(_times_skip) / _N_CALLS * 1e6
+
+skip_saving = cost_unflatten - cost_skip
+print(f"  tree_unflatten(empty_tree, []):  {cost_unflatten:.4f} µs")
+print(f"  value = () fast path:            {cost_skip:.4f} µs")
+print(f"  skip-unflatten saving:           {skip_saving:.4f} µs")
+print(
+    f"  [MEASURED — {skip_saving:.2f} µs saving — "
+    f"{'REJECTED' if skip_saving < 1.0 else 'CANDIDATE'} (gate: 1 µs)]"
+)
