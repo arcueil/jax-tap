@@ -1,6 +1,6 @@
 """Execution hidden inside "compile time".
 
-BUG PATTERN: the first call of a jitted function pays trace + compile +
+BUG: the first call of a jitted function pays trace + compile +
 execute in one opaque block. Naive profiling ("the first call is compilation")
 attributes ALL of it to compilation — and on asynchronously-dispatching
 backends the same conflation smears execution into whatever phase happens to

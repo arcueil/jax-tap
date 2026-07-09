@@ -14,6 +14,21 @@ and scientific-JAX development. Where a public reference exists, it is linked;
 the demos themselves are self-contained and assume no familiarity with any
 particular library.
 
+## Suggested reading order
+
+For a newcomer, start with this sequence:
+
+1. **`cholesky_float32_trap.py`** — a primitive tap on a single operation
+2. **`lowrank_metric_stuck.py`** — a carry tap with on-device `select` aggregation
+3. **`lbfgs_maxiter_curvature.py`** — a carry tap with address-specific `where` targeting
+4. **`multinomial_da_bimodal.py`** — streaming a carry's evolution to see its distribution
+5. **`treedepth_saturation.py`** — live tripwire + post-hoc statistics from one tapped stream
+6. **`mass_matrix_ndim_mismatch.py`** — reading trace-time fingerprints with `tap.primitives()`
+7. **`async_dispatch_compile_blowup.py`** — using event timestamps to locate a boundary
+8. **`backward_pass_vjp_nan.py`** — tapping the differentiated function to see the backward pass
+
+Each builds on the previous one's concepts, and together they show every major tap class and the patterns they address.
+
 ## Honesty about tap classes
 
 Each file states which tap class it uses, and where the ideal class is not yet
@@ -119,9 +134,9 @@ whatever phase blocks — see JAX's
 Real episodes hid minutes of execution inside a reported "tracing" number.
 **What it shows:** tap events are emitted by the RUNNING program, so the
 FIRST event's arrival timestamp IS the compile/execute boundary: the demo
-splits an opaque first call into 0.08s compile / 0.33s execution (81% of the
-"compilation" number was execution), cross-checked against the same
-program's steady-state run (0.32s, 3% agreement).
+splits an opaque first call into trace+compile vs execution (75–80% of the
+"compilation" number was actually execution), cross-checked against the same
+program's steady-state run for consistency.
 **Caveat:** the *ideal* is a **jit-event tap** class (trace/compile/execute
 timestamps — roadmap); event-arrival timing is the shipped approximation.
 
