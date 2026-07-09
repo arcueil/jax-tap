@@ -27,7 +27,6 @@ import time
 
 import jax
 import jax.numpy as jnp
-
 import jaxtap as tap
 
 N_STEPS = 4_000_000
@@ -58,14 +57,21 @@ def main() -> None:
     jax.block_until_ready(jax.jit(run)(x))
     t1 = time.perf_counter()
     first_call = t1 - t0
-    print(f"without jax-tap: first call took {first_call:.2f}s — naive profiling "
-          f"reports\n  'compilation: {first_call:.2f}s' and moves on to optimize tracing.")
+    print(
+        f"without jax-tap: first call took {first_call:.2f}s — naive profiling "
+        f"reports\n  'compilation: {first_call:.2f}s' and moves on to optimize tracing."
+    )
 
     # ---------------- with jax-tap: split the opaque window ----------------
     arrivals = []
-    g = jax.jit(tap.verbose(make_model(),
-                            on_step=lambda e: arrivals.append(time.perf_counter()),
-                            sample_every=500_000, select=lambda leaves: ()))
+    g = jax.jit(
+        tap.verbose(
+            make_model(),
+            on_step=lambda e: arrivals.append(time.perf_counter()),
+            sample_every=500_000,
+            select=lambda leaves: (),
+        )
+    )
     T0 = time.perf_counter()
     jax.block_until_ready(g(x))
     T1 = time.perf_counter()
@@ -80,7 +86,7 @@ def main() -> None:
     jax.block_until_ready(g(x))
     steady_exec = time.perf_counter() - t2
 
-    print(f"\nwith jax-tap (first event = compile/execute boundary):")
+    print("\nwith jax-tap (first event = compile/execute boundary):")
     print(f"  trace+compile : {compile_part:.2f}s")
     print(f"  execution     : {exec_part:.2f}s  <- was HIDDEN inside 'compilation'")
     print(f"  ({hidden:.0%} of the reported first-call number was actually execution)")
@@ -88,8 +94,9 @@ def main() -> None:
     print(f"     (validated: the actual second run measures {steady_exec:.2f}s)")
 
     ok = (abs(exec_part - steady_exec) / steady_exec < 0.5) and hidden > 0.3
-    print(f"\nRESULT: tap arrival time splits compile vs execution "
-          f"[{'PASS' if ok else 'FAIL'}]")
+    print(
+        f"\nRESULT: tap arrival time splits compile vs execution " f"[{'PASS' if ok else 'FAIL'}]"
+    )
 
 
 if __name__ == "__main__":
