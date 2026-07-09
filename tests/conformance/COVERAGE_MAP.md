@@ -8,6 +8,15 @@ One row per attack/probe script across all corpora.
 - `documented-boundary` — inherent behaviour with docstring reference
 - `N/A: <reason>` — not applicable (blackjax display thread, superseded API, etc.)
 
+**Conformance test files (both verified passing):**
+- `tests/conformance/test_bcore_conformance.py` — 20 tests, B-core lane (bcore-review + m1a/m1d-ays)
+- `tests/conformance/test_ashell_conformance.py` — 14 tests, A-shell lane (ashell-review arm-s/arm-l)
+
+**Note on attack-ledger-964:** All 53 scripts in arm-a and arm-b targeted the blackjax progress-bar
+subsystem, not jaxtap. Each row below documents the semantic equivalent in jaxtap (if any) and
+which existing or ported test covers it. The translations confirm coverage parity without porting
+blackjax-specific mechanics.
+
 ---
 
 ## proofs/attack-ledger-964/arm-a/ — historical blackjax progress-bar attacks
@@ -249,4 +258,9 @@ One row per attack/probe script across all corpora.
 | N/A | 57 |
 | **total** | **176** |
 
-*(Counts are per-check for multi-check scripts; per-file for single-scenario scripts.)*
+*(Counts are per-check for multi-check scripts; per-file for single-scenario scripts.
+Ported entries reference tests in `test_bcore_conformance.py` (20 tests) and
+`test_ashell_conformance.py` (14 tests); both verified 169/169 full-suite green.
+Two proof script failures are documented-boundary, not regressions: `ays_m1a_r2.py`
+"prim taps ungated" predates M1d FIX1; `ays_m1d.py` "vmap se-gate per-lane count"
+is inherent scalar-tap duality confirmed by `ays_m1d_r2.py`.)*
