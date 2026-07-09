@@ -58,16 +58,20 @@ nothing" is visible in one run. The fixed pipeline reaches 100×.
 **Tap class:** carry tap on adaptation state (`with` form + `select` +
 `sample_every`).
 
-### ✅ `lbfgs_maxiter_curvature.py` — the inner loop that quit early *(planned)*
+### ✅ `lbfgs_maxiter_curvature.py` — the inner loop that quit early
 **Bug pattern:** an inner optimizer (e.g. L-BFGS inside a Laplace
 approximation inside a sampler step) hits its iteration cap without
-converging. The returned curvature is silently inflated by an order of
-magnitude, collapsing the outer step size — all values finite, no warning,
-and the failing loop is several control-flow levels deep.
-**Will show:** a tap on the inner `while_loop`'s exit state
-(`iters == maxiter`, gradient norm) flags the non-converged exit — showcasing
-inner-loop taps and boundary-visible addressing (`scan[0]/jit[0]/while[0]`).
-**Tap class:** inner while-loop carry tap.
+converging. The curvature at the non-converged exit is silently inflated,
+collapsing the outer step size — all values finite, no warning, and the
+failing loop is several control-flow levels deep.
+**What it shows:** the inner solver's own carry already holds
+(iterations, gradient) — a carry tap streams its per-iteration heartbeat;
+splitting the stream at step-counter resets yields the exit state per outer
+step. Two transient cap-hits (30 iters, |grad| ~3e3) stand out instantly at
+their address `scan[0]/while[0]`, explaining a silent 58× step-size collapse.
+Also demonstrates two real seams: a solve needing 0 iterations emits no
+heartbeat, and one `select` serves every tapped node (branch on carry arity).
+**Tap class:** inner while-loop carry tap (heartbeat + exit state).
 
 ### ✅ `multinomial_da_bimodal.py` — acceptance secretly bimodal *(planned)*
 **Bug pattern:** a step-size controller consumes an acceptance statistic whose
