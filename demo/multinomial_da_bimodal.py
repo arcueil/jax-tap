@@ -44,7 +44,7 @@ def make_controller(n_steps: int):
         #     ({~0.95, ~0.02}); the controller below only ever sees its MEAN.
         accept = jnp.where(eps < tolerance, 0.95, 0.02)
         log_eps = log_eps + 0.3 * (accept - TARGET)  # dual-averaging-ish
-        # ╔═ jax-tap virtual injection ════════════════════════════════════╗
+        # ╔═ jax-tap virtual injection ═════════════════════════════════════╗
         # ║ print(accept)  — the carry this body RETURNS, every step        ║
         # ╚═ fires at this return; the controller is never edited ══════════╝
         return (log_eps, accept), log_eps

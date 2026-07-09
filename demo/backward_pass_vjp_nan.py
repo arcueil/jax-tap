@@ -29,9 +29,9 @@ import jaxtap as tap
 
 def make_loss():
     def body(c, x):
-        # ╔═ jax-tap virtual injection ════════════════════════════════════╗
-        # ║ forward taps here see r — always finite. The 0/0 lives in this  ║
-        # ║ line's DERIVATIVE (c/r), which only exists inside grad(loss).   ║
+        # ╔═ jax-tap virtual injection ══════════════════════════════════════╗
+        # ║ forward taps here see r — always finite. The 0/0 lives in this   ║
+        # ║ line's DERIVATIVE (c/r), which only exists inside grad(loss).    ║
         # ╚═ tap grad(loss) itself to give that NaN an address ══════════════╝
         r = jnp.sqrt(c**2 + x**2)  # <-- BUG LIVES HERE (in the backward pass)
         return r, None

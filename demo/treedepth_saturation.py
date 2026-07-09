@@ -40,7 +40,7 @@ def make_sampler(n_draws: int):
         needed = jnp.ceil(jnp.log2(1.0 + jnp.abs(x) * 3.0)) + 6.0
         depth = jnp.minimum(needed, MAX_TREEDEPTH)  # <-- BUG LIVES HERE: the
         #     cap binds silently; the draw returns either way.
-        # ╔═ jax-tap virtual injection ════════════════════════════════════╗
+        # ╔═ jax-tap virtual injection ═════════════════════════════════════╗
         # ║ print(depth)  — the carry this body RETURNS, every draw         ║
         # ╚═ fires at this return; the sampler is never edited ═════════════╝
         return (x, depth), x

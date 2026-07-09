@@ -36,9 +36,9 @@ DIM = 16
 
 def make_model():
     def body(c, _):
-        # ╔═ jax-tap virtual injection ════════════════════════════════════╗
-        # ║ (any tap here doubles as an execution heartbeat: its arrival    ║
-        # ║  timestamp proves the program is EXECUTING, not compiling)      ║
+        # ╔═ jax-tap virtual injection ══════════════════════════════════════╗
+        # ║ (any tap here doubles as an execution heartbeat: its arrival     ║
+        # ║  timestamp proves the program is EXECUTING, not compiling)       ║
         # ╚═ fires at this return, gated by sample_every ════════════════════╝
         return c * 0.99999 + jnp.sin(c) * 1e-5, None
 
