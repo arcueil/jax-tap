@@ -56,6 +56,7 @@ __all__ = [
     "PrimitiveTap",
     "on",
     "watch_nan",
+    "print",
     "primitives",
     "verbose",
     "record",
@@ -136,6 +137,9 @@ class PrimitiveTap:
     select: "Callable | None" = None
     alert: "Callable | None" = None
     label: "str | None" = None
+    output: "int | None" = None
+    # _printer: set by tap.print() — uses value format instead of FAIL label format.
+    _printer: bool = dataclasses.field(default=False, repr=False)
 
 
 def on(
@@ -143,6 +147,7 @@ def on(
     select: "Callable | None" = None,
     alert: "Callable | None" = None,
     label: "str | None" = None,
+    output: "int | None" = None,
 ) -> PrimitiveTap:
     """Create a :class:`PrimitiveTap` spec.
 
@@ -151,19 +156,25 @@ def on(
     prim_name:
         Name of the JAX primitive to tap.
     select:
-        Optional on-device reducer applied to the primitive's output tuple.
+        Optional on-device reducer applied to the primitive's output tuple
+        (or to the single output when ``output=k`` is given).
     alert:
         Optional HOST-side predicate on the event value; when truthy, emits one
         terse line to stderr: ``[tap] FAIL {path} {step}/{total}: {label}``.
         Runs inside the ``_guard`` discipline (never propagates).
     label:
         Short label for the alert line.  Default: ``prim_name``.
+    output:
+        Select a single primitive output by index before calling ``select``
+        (or before delivering the value when ``select`` is ``None``).
+        ``None`` (default) passes the full output tuple.  Out-of-range indices
+        raise ``IndexError`` at trace time.
 
     Returns
     -------
     PrimitiveTap
     """
-    return PrimitiveTap(prim_name=prim_name, select=select, alert=alert, label=label)
+    return PrimitiveTap(prim_name=prim_name, select=select, alert=alert, label=label, output=output)
 
 
 # ---------------------------------------------------------------------------
@@ -193,11 +204,34 @@ def _guard(on_step: Callable[[TapEvent], None], event: TapEvent) -> None:
                 pass
 
 
+def _format_value(value: Any) -> str:
+    """Compact repr of a host-side value for :func:`tap.print` output.
+
+    Uses numpy with ``printoptions(precision=4, threshold=8, edgeitems=2)`` so
+    large arrays truncate rather than flooding stderr with numbers.
+    """
+    import numpy as _np  # lazy — only imported when a tap.print actually fires
+
+    try:
+        arr = _np.asarray(value)
+        with _np.printoptions(precision=4, threshold=8, edgeitems=2):
+            return repr(arr)
+    except Exception:  # noqa: BLE001
+        try:
+            return repr(value)
+        except Exception:  # noqa: BLE001
+            return "<unprintable>"
+
+
 def _fire_alert(spec: PrimitiveTap, event: TapEvent) -> None:
-    """Fire ``spec.alert(event.value)`` and print the terse line to stderr if truthy.
+    """Fire ``spec.alert(event.value)`` and write the terse line to stderr if truthy.
 
     Runs inside the ``_guard`` discipline: a raising alert predicate is caught,
     warned once, and suppressed — it never propagates to the user.
+
+    When ``spec._printer`` is True (set by :func:`print`), the line uses the
+    value format ``[tap] {path} {step}/{total}: {value}`` instead of the FAIL
+    format ``[tap] FAIL {path} {step}/{total}: {label}``.
     """
     alert_fn = spec.alert
     assert alert_fn is not None  # caller must check
@@ -218,9 +252,15 @@ def _fire_alert(spec: PrimitiveTap, event: TapEvent) -> None:
         return
     if should_alert:
         total_str = str(event.total) if event.total is not None else "?"
-        label = spec.label if spec.label is not None else spec.prim_name
         try:
-            print(f"[tap] FAIL {event.path} {event.step}/{total_str}: {label}", file=sys.stderr)
+            if spec._printer:
+                # tap.print format: [tap] {path} {step}/{total}: {value_repr}
+                value_repr = _format_value(event.value)
+                sys.stderr.write(f"[tap] {event.path} {event.step}/{total_str}: {value_repr}\n")
+            else:
+                # alert format: [tap] FAIL {path} {step}/{total}: {label}
+                label = spec.label if spec.label is not None else spec.prim_name
+                sys.stderr.write(f"[tap] FAIL {event.path} {event.step}/{total_str}: {label}\n")
         except Exception:  # noqa: BLE001
             pass
 
@@ -380,10 +420,22 @@ def verbose(
         def prim_tap_fn(
             path: str, step: Any, outvals: tuple, spec: PrimitiveTap, total: "int | None" = None
         ) -> None:  # type: ignore[misc]
-            if spec.select is not None:
-                selected = spec.select(outvals)
+            # Apply output index selection first (trace-time bounds check).
+            if spec.output is not None:
+                k = spec.output
+                n = len(outvals)
+                if k < 0 or k >= n:
+                    raise IndexError(
+                        f"jaxtap: tap.on({spec.prim_name!r}, output={k}) — primitive has"
+                        f" {n} output(s) (valid indices: 0..{n - 1})"
+                    )
+                eff_outs: Any = outvals[k]
             else:
-                selected = outvals
+                eff_outs = outvals
+            if spec.select is not None:
+                selected = spec.select(eff_outs)
+            else:
+                selected = eff_outs
             flat_selected = jax.tree_util.tree_leaves(selected)
             sel_tree = jax.tree_util.tree_structure(selected)
             _spec = spec  # capture for host closure
@@ -537,7 +589,7 @@ def record(
 # ---------------------------------------------------------------------------
 
 
-def watch_nan(prim_name: str, label: str = "NaN/Inf") -> PrimitiveTap:
+def watch_nan(prim_name: str, label: str = "NaN/Inf", output: "int | None" = None) -> PrimitiveTap:
     """Create a :class:`PrimitiveTap` that alerts when any float output is non-finite.
 
     Equivalent to::
@@ -558,27 +610,101 @@ def watch_nan(prim_name: str, label: str = "NaN/Inf") -> PrimitiveTap:
         Use :func:`primitives` to discover the correct string.
     label:
         Short label shown in the alert line.  Default: ``"NaN/Inf"``.
+    output:
+        Optional single-output index.  When given, the finiteness check applies
+        to that one output array (not a tuple) — useful for primitives such as
+        ``eigh`` which return multiple outputs and you only care about one.
+        ``None`` (default) checks all float outputs in the output tuple.
 
     Returns
     -------
     PrimitiveTap
     """
-
-    def _select_finite(outs: tuple) -> Any:
-        checks = []
-        for o in outs:
+    if output is not None:
+        # Single-array mode: select receives one array, not a tuple.
+        def _select_finite_single(o: Any) -> Any:
             try:
                 if jnp.issubdtype(o.dtype, jnp.floating):
-                    checks.append(jnp.all(jnp.isfinite(o)))
+                    return jnp.all(jnp.isfinite(o))
             except (AttributeError, TypeError):
                 pass
-        if not checks:
-            return jnp.bool_(True)  # no float outputs — trivially ok
-        if len(checks) == 1:
-            return checks[0]
-        return jnp.all(jnp.stack(checks))
+            return jnp.bool_(True)
 
-    return on(prim_name, select=_select_finite, alert=lambda ok: not ok, label=label)
+        select_fn = _select_finite_single
+    else:
+        # Tuple mode: select receives the full output tuple.
+        def _select_finite_tuple(outs: tuple) -> Any:
+            checks = []
+            for o in outs:
+                try:
+                    if jnp.issubdtype(o.dtype, jnp.floating):
+                        checks.append(jnp.all(jnp.isfinite(o)))
+                except (AttributeError, TypeError):
+                    pass
+            if not checks:
+                return jnp.bool_(True)  # no float outputs — trivially ok
+            if len(checks) == 1:
+                return checks[0]
+            return jnp.all(jnp.stack(checks))
+
+        select_fn = _select_finite_tuple
+
+    return on(prim_name, select=select_fn, alert=lambda ok: not ok, label=label, output=output)
+
+
+def print(  # noqa: A001 — intentionally shadows builtin; internal code uses sys.stderr.write
+    prim_name: str,
+    output: "int | None" = None,
+    select: "Callable | None" = None,
+    label: "str | None" = None,
+) -> PrimitiveTap:
+    """Create a :class:`PrimitiveTap` that always prints the tapped value to stderr.
+
+    Every time the named primitive fires, emits one line to stderr::
+
+        [tap] {path} {step}/{total_or_'?'}: {value}
+
+    where ``value`` is formatted with
+    ``numpy.printoptions(precision=4, threshold=8, edgeitems=2)`` so large
+    arrays are truncated rather than flooding the terminal.
+
+    This is the simplest diagnostic tool: add it while debugging, remove it
+    when done — no other code changes needed.
+
+    Parameters
+    ----------
+    prim_name:
+        JAX primitive name to tap (e.g. ``"dot_general"``).
+    output:
+        Optional single-output index.  When given, only that output array is
+        printed.  ``None`` prints the full output tuple.
+    select:
+        Optional on-device reducer applied before printing.  Receives the
+        output (single array if ``output=k``, tuple otherwise).
+    label:
+        Unused for the print format, but stored on the spec for composition
+        with an additional ``alert``.
+
+    Returns
+    -------
+    PrimitiveTap
+
+    Examples
+    --------
+    ::
+
+        with tap.record(taps=[tap.print("dot_general")]) as rec:
+            result = model(x)
+        # [tap] scan[0]/jit[0]/dot_general[0] 3/25: array([[...]])
+    """
+    return PrimitiveTap(
+        prim_name=prim_name,
+        output=output,
+        select=select,
+        alert=lambda v: True,  # always fire
+        label=label,
+        _printer=True,
+    )
 
 
 # ---------------------------------------------------------------------------
