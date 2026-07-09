@@ -7,9 +7,14 @@ HARD TO DETECT: nothing errors, nothing is non-finite; samples still flow.
 The only symptom is quietly degraded mixing on correlated targets — a
 statistics-level bias that can take a multi-day investigation to trace back
 to a shape.
-WITH TAP: the executed PRIMITIVES are the fingerprint — the dense path
-contains a `dot_general`; the diagonal path only a `mul`. `tap.primitives()`
-reads that fingerprint at trace time (zero runtime cost), and
+WITH TAP: a Python-level `if/else` (like the ndim dispatch) runs at TRACE
+time — only the taken branch is baked into the compiled program; the other
+path simply does not exist in the jaxpr. That is exactly why this class is
+hard to debug at runtime. But the baked-in branch leaves a fingerprint: the
+dense path contains a `dot_general`, the diagonal path only a `mul`.
+`tap.primitives()` reads the traced jaxpr directly, so if you know the op's
+name (`dot_general` here), checking whether that code path was baked in at
+all is a one-liner — trace time, zero runtime cost. And
 `tap.print("dot_general", once=True)` confirms it live — SILENCE on the buggy
 run is itself the symptom. NOTE: the ideal
 here is a dedicated trace-time SHAPE tap (roadmap); `tap.primitives()` is the
