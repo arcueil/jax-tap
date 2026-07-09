@@ -41,9 +41,9 @@ def make_sampler(inverse_mass_matrix):
     def apply_imm(v):
         if inverse_mass_matrix.ndim == 2:
             return jnp.dot(inverse_mass_matrix, v)  # dense algorithm
-        # jax-tap sees this branch was taken: the executed program contains a
-        # `mul` where the dense config should have produced a `dot_general` —
-        # AS IF we injected `print(inverse_mass_matrix.ndim)` right here.
+        # ╔═ jax-tap virtual injection ═══════════════════════════════════╗
+        # ║ print(inverse_mass_matrix.ndim)  — which algebra actually ran  ║
+        # ╚═ read at TRACE time via tap.primitives(); nothing edited ══════╝
         return inverse_mass_matrix * v  # diagonal algorithm (elementwise)
 
     def step(carry, key):
