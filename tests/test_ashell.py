@@ -596,3 +596,386 @@ def test_ashell_on_step_bform():
     assert bitwise_eq(ref, got), "B-form on_step broke bitwise identity"
     assert len(rec.events) == N, f"recorder expected {N} events, got {len(rec.events)}"
     assert len(live_events) == N, f"live callback expected {N} events, got {len(live_events)}"
+
+
+# ===========================================================================
+# REMEDIATION regression tests (arm-S + arm-L findings)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 18. BLOCKER-1: positional args battery (arm-S)
+# ---------------------------------------------------------------------------
+
+
+def test_ashell_scan_positional_reverse():
+    """scan(f, init, xs, None, True) — reverse positional — works inside context."""
+    xs = jnp.arange(5.0, dtype=jnp.float32)
+
+    def body(c, x):
+        return c + x, c
+
+    ref = jax.lax.scan(body, jnp.float32(0.0), xs, None, True)  # reverse positional
+
+    with tap.record() as rec:
+        got = jax.lax.scan(body, jnp.float32(0.0), xs, None, True)
+
+    jax.block_until_ready(got)
+    assert bitwise_eq(ref, got), "reverse=True positional: result wrong inside context"
+    assert len(rec.events) == len(xs), "reverse=True positional: wrong event count"
+
+
+def test_ashell_scan_positional_unroll():
+    """scan(f, init, xs, None, False, 2) — unroll positional — works inside context."""
+    xs = jnp.arange(5.0, dtype=jnp.float32)
+
+    def body(c, x):
+        return c + x, c
+
+    ref = jax.lax.scan(body, jnp.float32(0.0), xs, None, False, 2)  # unroll=2 positional
+
+    with tap.record() as rec:
+        got = jax.lax.scan(body, jnp.float32(0.0), xs, None, False, 2)
+
+    jax.block_until_ready(got)
+    assert bitwise_eq(ref, got), "unroll=2 positional: result wrong inside context"
+    assert len(rec.events) == len(xs), "unroll=2 positional: wrong event count"
+
+
+# ---------------------------------------------------------------------------
+# 19. MAJOR-1: sequential top-level scans get unique paths (arm-S)
+# ---------------------------------------------------------------------------
+
+
+def test_ashell_sequential_scan_paths():
+    """Two sequential top-level scans in one context: paths must be scan[0], scan[1]."""
+    xs = jnp.arange(5.0, dtype=jnp.float32)
+
+    def two_scans(x0):
+        a, _ = jax.lax.scan(lambda c, x: (c + x, c), x0, xs)
+        b, _ = jax.lax.scan(lambda c, x: (c * x + 1, c), a, xs)
+        return b
+
+    ref = two_scans(jnp.float32(1.0))
+
+    with tap.record() as rec:
+        got = two_scans(jnp.float32(1.0))
+
+    jax.block_until_ready(got)
+    assert bitwise_eq(ref, got), "sequential scans: result wrong"
+    paths = sorted({e.path for e in rec.events})
+    assert paths == ["scan[0]", "scan[1]"], f"expected [scan[0], scan[1]], got {paths}"
+    assert sum(1 for e in rec.events if e.path == "scan[0]") == len(xs)
+    assert sum(1 for e in rec.events if e.path == "scan[1]") == len(xs)
+
+
+def test_ashell_sequential_scan_while_paths():
+    """Sequential scan then while in one context: paths must be scan[0], while[1]."""
+    xs = jnp.arange(5.0, dtype=jnp.float32)
+
+    def scan_then_while(x0):
+        a, _ = jax.lax.scan(lambda c, x: (c + x, c), x0, xs)
+        b = jax.lax.while_loop(lambda c: c < 50.0, lambda c: c + 1.0, a)
+        return b
+
+    ref = scan_then_while(jnp.float32(1.0))
+
+    with tap.record() as rec:
+        got = scan_then_while(jnp.float32(1.0))
+
+    jax.block_until_ready(got)
+    assert bitwise_eq(ref, got), "scan+while: result wrong"
+    paths = sorted({e.path for e in rec.events})
+    assert "scan[0]" in paths, f"scan[0] missing from {paths}"
+    assert "while[1]" in paths, f"while[1] missing from {paths}"
+
+
+def test_ashell_python_loop_five_scans():
+    """Five separate top-level scans via Python loop: paths scan[0..4], 5*N events total."""
+    N = 5
+    xs = jnp.arange(float(N), dtype=jnp.float32)
+
+    def py_loop(x0):
+        outs = []
+        for i in range(N):
+            r, _ = jax.lax.scan(lambda c, x: (c + x + i, c), x0, xs)
+            outs.append(r)
+        return jnp.stack(outs)
+
+    ref = py_loop(jnp.float32(0.0))
+
+    with tap.record() as rec:
+        got = py_loop(jnp.float32(0.0))
+
+    jax.block_until_ready(got)
+    assert bitwise_eq(ref, got), "python-loop 5 scans: result wrong"
+    paths = sorted({e.path for e in rec.events})
+    expected_paths = [f"scan[{i}]" for i in range(N)]
+    assert paths == expected_paths, f"expected {expected_paths}, got {paths}"
+    assert len(rec.events) == N * N, f"expected {N * N} total events, got {len(rec.events)}"
+
+
+def test_ashell_scan_cond_scan_divergence_pin():
+    """Conformance pin: scan/cond/scan diverges from verbose() addressing.
+
+    verbose() addresses the top-level jaxpr equations: scan[0], cond[1], scan[2].
+    The A-shell only intercepts scan/while_loop calls, so cond is invisible to it.
+    A-shell: scan[0], scan[1] (two intercepts, consecutive indices).
+    verbose(): scan[0], scan[2] (cond increments the counter to 1, scan gets 2).
+
+    This is a documented boundary, not a bug.  The test pins the behavior.
+    """
+    xs = jnp.arange(4.0, dtype=jnp.float32)
+
+    def scan_cond_scan(x0):
+        # top-level: scan, then cond (invisible to A-shell), then scan
+        a, _ = jax.lax.scan(lambda c, x: (c + x, c), x0, xs)
+        b = jax.lax.cond(a > 10.0, lambda _: a * 2.0, lambda _: a * 0.5, a)
+        c, _ = jax.lax.scan(lambda carry, x: (carry + x, carry), b, xs)
+        return c
+
+    ref = scan_cond_scan(jnp.float32(0.0))
+
+    # A-shell: two intercepted calls -> scan[0], scan[1]
+    with tap.record() as rec:
+        got = scan_cond_scan(jnp.float32(0.0))
+    jax.block_until_ready(got)
+    assert bitwise_eq(ref, got), "scan/cond/scan: result wrong in A-shell"
+    ash_paths = sorted({e.path for e in rec.events})
+    assert ash_paths == [
+        "scan[0]",
+        "scan[1]",
+    ], f"A-shell: expected [scan[0], scan[1]], got {ash_paths}"
+
+    # verbose(): n_cf advances through scan[0], cond[1], scan[2]
+    vb_events: list = []
+    tap.verbose(scan_cond_scan, on_step=vb_events.append)(jnp.float32(0.0))
+    jax.block_until_ready(None)
+    vb_paths = sorted({e.path for e in vb_events})
+    assert vb_paths == [
+        "scan[0]",
+        "scan[2]",
+    ], f"verbose: expected [scan[0], scan[2]], got {vb_paths}"
+
+
+# ---------------------------------------------------------------------------
+# 20. L1: re-enter same context raises RuntimeError
+# ---------------------------------------------------------------------------
+
+
+def test_ashell_reenter_raises():
+    """Reusing the same context object in nested with-blocks raises RuntimeError."""
+    ctx = tap.record()
+    with pytest.raises(RuntimeError, match="not re-entrant"):
+        with ctx:
+            with ctx:  # second enter on same object must raise
+                pass
+    # After the exception, primitives must be restored.
+    from jaxtap._ashell import _context_registry, _original_scan, _original_while
+
+    assert jax.lax.scan is _original_scan, "lax.scan not restored after re-enter error"
+    assert jax.lax.while_loop is _original_while, "while_loop not restored after re-enter error"
+    assert len(_context_registry) == 0, "registry not empty after re-enter error"
+
+
+# ---------------------------------------------------------------------------
+# 21. emergency_restore restores correctly
+# ---------------------------------------------------------------------------
+
+
+def test_ashell_emergency_restore():
+    """jaxtap.emergency_restore() restores patched primitives and clears state."""
+    import jaxtap
+    from jaxtap._ashell import _original_scan, _original_while, _patched_scan
+
+    # Force a leaking state (simulate a crash: manually enter, never exit).
+    ctx = tap.record()
+    ctx.__enter__()
+    assert jax.lax.scan is _patched_scan, "scan should be patched before restore"
+
+    jaxtap.emergency_restore()
+
+    assert jax.lax.scan is _original_scan, "scan not restored by emergency_restore"
+    assert jax.lax.while_loop is _original_while, "while_loop not restored by emergency_restore"
+    from jaxtap._ashell import _context_registry, _session_scan, _session_while
+
+    assert len(_context_registry) == 0, "registry not empty after emergency_restore"
+    assert _session_scan is None, "_session_scan not cleared"
+    assert _session_while is None, "_session_while not cleared"
+
+    # Detach the orphaned finalizer to avoid spurious cleanup later.
+    if ctx._finalizer is not None:
+        ctx._finalizer.detach()
+        ctx._finalizer = None
+
+
+# ---------------------------------------------------------------------------
+# 22. L3/L4: double-exit no-op + no warning poisoning
+# ---------------------------------------------------------------------------
+
+
+def test_ashell_double_exit_noop():
+    """Double __exit__ is a harmless no-op: no warning, scan still original."""
+    import warnings
+
+    from jaxtap._ashell import _original_scan
+
+    ctx = tap.record()
+    with ctx:
+        pass
+    # self._key is now None; second exit should be silent no-op
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        ctx.__exit__(None, None, None)
+
+    jaxtap_warns = [x for x in w if "jaxtap" in str(x.message)]
+    assert len(jaxtap_warns) == 0, f"double-exit emitted unexpected warning: {jaxtap_warns}"
+    assert jax.lax.scan is _original_scan, "scan was corrupted by double-exit"
+
+
+def test_ashell_bogus_exit_does_not_poison_warnonce():
+    """exit-without-enter must not poison warn-once flag; real clobber still warns."""
+    import warnings
+
+    import jaxtap._ashell as A
+
+    # Reset state.
+    A._clobber_scan_warned = False
+    A._clobber_while_warned = False
+
+    # Bogus exit: never entered, _key is None.
+    ctx = tap.record()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        ctx.__exit__(None, None, None)
+    assert not w, f"bogus exit emitted unexpected warnings: {w}"
+    assert A._clobber_scan_warned is False, "bogus exit poisoned warn-once flag"
+
+    # Genuine clobber: should warn.
+    with warnings.catch_warnings(record=True) as w_real:
+        warnings.simplefilter("always")
+        with tap.record():
+            jax.lax.scan = A._original_scan  # foreign clobber during context
+        # exit sees non-patched scan → warns
+    jax.lax.scan = A._original_scan  # cleanup
+    A._clobber_scan_warned = False  # cleanup
+
+    real_warned = any("jaxtap" in str(x.message) for x in w_real)
+    assert real_warned, "genuine clobber warning was silenced"
+
+
+# ---------------------------------------------------------------------------
+# 23. L6: session-scoped warn-once (two independent clobbers both warn)
+# ---------------------------------------------------------------------------
+
+
+def test_ashell_session_scoped_warnonce():
+    """Two independent sessions each with a clobber: both emit a warning."""
+    import warnings
+
+    from jaxtap._ashell import _original_scan
+
+    # Session 1 clobber.
+    with warnings.catch_warnings(record=True) as w1:
+        warnings.simplefilter("always")
+        with tap.record():
+            jax.lax.scan = lambda f, init, xs=None, length=None, **kw: _original_scan(
+                f, init, xs=xs, length=length, **kw
+            )
+    jax.lax.scan = _original_scan
+    n1 = sum("jaxtap" in str(x.message) for x in w1)
+
+    # Session 2 clobber — flags reset on new session start.
+    with warnings.catch_warnings(record=True) as w2:
+        warnings.simplefilter("always")
+        with tap.record():
+            jax.lax.scan = lambda f, init, xs=None, length=None, **kw: _original_scan(
+                f, init, xs=xs, length=length, **kw
+            )
+    jax.lax.scan = _original_scan
+    n2 = sum("jaxtap" in str(x.message) for x in w2)
+
+    assert n1 >= 1, "first clobber should have warned"
+    assert n2 >= 1, "second clobber should also warn (session-scoped reset)"
+
+
+# ---------------------------------------------------------------------------
+# 24. L2: manual-enter GC self-heal
+# ---------------------------------------------------------------------------
+
+
+def test_ashell_gc_selfheal():
+    """Manual __enter__ without __exit__: dropping the context allows GC to restore."""
+    import gc
+
+    from jaxtap._ashell import (
+        _context_registry,
+        _original_scan,
+        _original_while,
+        _patched_scan,
+    )
+
+    # Clean state.
+    assert jax.lax.scan is _original_scan
+    assert len(_context_registry) == 0
+
+    def leaky_enter():
+        ctx = tap.record()
+        ctx.__enter__()
+        # ctx falls out of scope here without __exit__
+
+    leaky_enter()
+    gc.collect()  # CPython ref-counting handles it immediately; gc.collect for PyPy
+
+    assert jax.lax.scan is not _patched_scan, "GC self-heal: scan still patched"
+    assert jax.lax.scan is _original_scan, "GC self-heal: scan not restored to original"
+    assert jax.lax.while_loop is _original_while, "GC self-heal: while_loop not restored"
+    assert len(_context_registry) == 0, "GC self-heal: registry not empty"
+
+
+# ---------------------------------------------------------------------------
+# 25. L5: verbose()/record(f) inside context — single instrumentation
+# ---------------------------------------------------------------------------
+
+
+def test_ashell_verbose_inside_context_no_double():
+    """verbose(f) called inside an active context: user callback counts correct,
+    context recorder sees 0 events from the explicitly-tapped call."""
+    N = 5
+    x0 = jnp.float32(1.0)
+    xs = jnp.arange(float(N), dtype=jnp.float32)
+    ref = _simple_scan(x0, xs)
+
+    user_events: list = []
+
+    with tap.record() as rec_ctx:
+        g = tap.verbose(_simple_scan, on_step=lambda e: user_events.append(e))
+        got = g(x0, xs)
+        jax.block_until_ready(got)
+
+    assert bitwise_eq(ref, got), "verbose inside context: result wrong"
+    assert len(user_events) == N, f"user callback: expected {N} events, got {len(user_events)}"
+    assert len(rec_ctx.events) == 0, (
+        f"context recorder: expected 0 events from explicit verbose() call, "
+        f"got {len(rec_ctx.events)}"
+    )
+
+
+def test_ashell_record_bform_inside_context_no_double():
+    """record(f) (B-form) called inside an active context: no double instrumentation."""
+    N = 4
+    x0 = jnp.float32(1.0)
+    xs = jnp.arange(float(N), dtype=jnp.float32)
+    ref = _simple_scan(x0, xs)
+
+    with tap.record() as rec_ctx:
+        g, rec_inner = tap.record(_simple_scan)
+        got = g(x0, xs)
+        jax.block_until_ready(got)
+
+    assert bitwise_eq(ref, got), "record(f) inside context: result wrong"
+    assert (
+        len(rec_inner.events) == N
+    ), f"inner recorder: expected {N} events, got {len(rec_inner.events)}"
+    assert (
+        len(rec_ctx.events) == 0
+    ), f"outer context: expected 0 events from record(f) call, got {len(rec_ctx.events)}"

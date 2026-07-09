@@ -55,6 +55,7 @@ __all__ = [
     "on",
     "verbose",
     "record",
+    "emergency_restore",
     "FlightRecorder",
     "JSONLWriter",
     "read_jsonl",
@@ -178,6 +179,7 @@ def verbose(
     where: "Callable[[str], bool] | None" = None,
     max_depth: "int | None" = None,
     taps: "Sequence[PrimitiveTap]" = (),
+    _start_cf_index: int = 0,
 ) -> Callable:
     """
     Return a function bitwise-identical to ``f`` that emits telemetry from
@@ -323,6 +325,7 @@ def verbose(
             max_depth=max_depth,
             prim_taps=taps,
             prim_tap_fn=prim_tap_fn,
+            _start_cf_index=_start_cf_index,
         )
 
     return wrapped
@@ -448,6 +451,24 @@ def record(
 # ---------------------------------------------------------------------------
 # Re-export collectors for convenience
 # ---------------------------------------------------------------------------
+
+
+def emergency_restore() -> None:
+    """Restore ``jax.lax.scan`` / ``jax.lax.while_loop`` to session-captured originals.
+
+    For recovering a corrupted interactive session — e.g. after a crash inside a
+    ``tap.record()`` block or an interrupted kernel.
+
+    If our patch is on top, restores to the pre-session value (or the import-time
+    original when none was captured), clears the registry, and resets session state.
+    If a foreign patch is on top, warns and leaves it alone but still clears our
+    internal state.
+
+    Well-behaved code using ``with tap.record():`` never needs this.
+    """
+    from ._ashell import emergency_restore as _er
+
+    _er()
 
 
 def __getattr__(name: str) -> Any:

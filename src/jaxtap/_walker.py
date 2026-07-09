@@ -135,6 +135,7 @@ import jax
 import jax.numpy as jnp
 from jax.extend import core as jax_core
 
+from ._ashell import suppress_interception
 from ._rewrites import rewrite_scan, rewrite_while
 
 # ---------------------------------------------------------------------------
@@ -170,6 +171,7 @@ def interpret(
     max_depth: "int | None" = None,
     prim_taps: Sequence[Any] = (),
     prim_tap_fn: "Callable | None" = None,
+    _start_cf_index: int = 0,
 ) -> Any:
     """
     Trace ``f(*args)`` once with ``make_jaxpr(return_shape=True)`` and run
@@ -191,25 +193,51 @@ def interpret(
     prim_tap_fn:
         Callable ``(path, step, outvals_tuple, spec)`` that fires the host
         callback.  Required when ``prim_taps`` is non-empty.
+    _start_cf_index:
+        Private kwarg.  Initial value for the top-level boundary counter
+        ``n_cf`` in ``_interp``.  Default 0 (standard verbose() usage).
+        Set by the A-shell to ensure sequential top-level intercepts are
+        addressed as ``scan[k]``/``while[k]`` with k monotonically increasing
+        per context rather than always restarting at 0.
 
     Returns the output pytree of ``f(*args)``.
     """
-    closed, out_shapes = jax.make_jaxpr(f, return_shape=True)(*args)
-    out_tree = jax.tree_util.tree_structure(out_shapes)
-    flat_args = jax.tree_util.tree_leaves(args)
-    out_flat = _interp(
-        closed.jaxpr,
-        closed.consts,
-        flat_args,
-        tap_cb,
-        ops,
-        path="",
-        where=where,
-        max_depth=max_depth,
-        step=None,
-        prim_taps=prim_taps,
-        prim_tap_fn=prim_tap_fn,
-    )
+    # L5: suppress A-shell interception for the ENTIRE interpret() call.
+    #
+    # Two interception sites must be guarded:
+    #
+    # 1. make_jaxpr tracing: jax.lax.scan/while_loop inside f resolve to
+    #    _patched_scan/_patched_while. Without suppression the active context
+    #    would intercept them during tracing, before the B-core even runs.
+    #
+    # 2. _interp execution (rewrite_scan / rewrite_while): the B-core emits
+    #    jax.lax.scan(body_fn, ...) to run the user loop with callbacks baked
+    #    in. These calls also resolve to _patched_scan at depth 0 (no outer
+    #    _patched_scan on the call stack, since verbose() was called directly
+    #    rather than through the A-shell intercept path). Without suppression
+    #    the active context intercepts them again — double-instrumentation.
+    #
+    # The depth counter alone cannot guard site 2 when verbose()/record(f) is
+    # invoked directly by the user rather than via _patched_scan (which would
+    # have depth > 0). suppress_interception() covers both sites cleanly.
+    with suppress_interception():
+        closed, out_shapes = jax.make_jaxpr(f, return_shape=True)(*args)
+        out_tree = jax.tree_util.tree_structure(out_shapes)
+        flat_args = jax.tree_util.tree_leaves(args)
+        out_flat = _interp(
+            closed.jaxpr,
+            closed.consts,
+            flat_args,
+            tap_cb,
+            ops,
+            path="",
+            where=where,
+            max_depth=max_depth,
+            step=None,
+            prim_taps=prim_taps,
+            prim_tap_fn=prim_tap_fn,
+            _start_cf_index=_start_cf_index,
+        )
     return jax.tree_util.tree_unflatten(out_tree, out_flat)
 
 
@@ -236,6 +264,7 @@ def _interp(
     step: Any = None,
     prim_taps: Sequence[Any] = (),
     prim_tap_fn: "Callable | None" = None,
+    _start_cf_index: int = 0,
 ) -> list:
     """Evaluate ``jaxpr`` against ``args``, rewriting CF primitives in ``ops``.
 
@@ -250,6 +279,10 @@ def _interp(
     prim_tap_fn:
         Host callback builder; called as ``prim_tap_fn(path, step, outvals, spec)``
         for each matched primitive.
+    _start_cf_index:
+        Private kwarg.  Initial value for the top-level boundary counter.
+        Forwarded from ``interpret()``; zero for all recursive calls (the counter
+        starts fresh at each nesting level).
     """
     # Normalise sentinel: None means "not inside any loop".
     if step is None:
@@ -262,7 +295,12 @@ def _interp(
     for v, val in zip(jaxpr.invars, args):
         env[v] = val
 
-    n_cf = 0  # per-level boundary counter for stable path addressing
+    # _start_cf_index: used at the TOP level only (forwarded from interpret()).
+    # Recursive calls (rewrite_scan, rewrite_while, jit/cond/remat) call
+    # _recurse with path_ already extended — they always start their OWN n_cf
+    # at 0 via the default _start_cf_index=0.  Only the outermost _interp call
+    # (from interpret()) may receive a non-zero start (A-shell MAJOR-1 fix).
+    n_cf = _start_cf_index  # per-level boundary counter for stable path addressing
     # Per-level, per-prim-name occurrence counter for primitive tap addressing.
     n_prim_tap: dict[str, int] = {}
 
