@@ -1,0 +1,30 @@
+name: publish
+
+# PyPI publish via Trusted Publishing (OIDC) — no stored API tokens.
+# Trigger: publishing a GitHub release. One-time setup on pypi.org:
+#   Account → Publishing → "Add a new pending publisher":
+#     project=jax-tap, owner=arcueil, repository=jax-tap,
+#     workflow=publish.yml, environment=pypi
+# The first successful run CREATES the PyPI project.
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # OIDC token minting for PyPI — the only permission needed
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v5
+      - name: Build sdist and wheel from the release tag
+        run: uv build
+      - name: Publish to PyPI (trusted publishing)
+        run: uv publish --trusted-publishing always
