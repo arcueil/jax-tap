@@ -39,8 +39,8 @@ Arms
 
 Usage
 -----
-  uv run python bench/while_cond_overhead.py           # N=200, K=7
-  uv run python bench/while_cond_overhead.py --smoke   # N=200, K=3 (same iters, fewer repeats)
+  uv run python bench/while_cond_overhead.py           # N=2000, K=25
+  uv run python bench/while_cond_overhead.py --smoke   # N=2000, K=7 (same iters, fewer repeats)
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ import jax.numpy as jnp
 import jaxtap as tap
 
 DIM = 16
-N_ITERS = 200  # fixed trip count for all arms
+N_ITERS = 2000  # fixed trip count for all arms (≥2000 for stable medians)
 # norm threshold set far below any reachable value so the counter always binds.
 # init_v is ones → norm ~= 4.0; tol = 0.01 is never reached in 200 iters with lr=0.001.
 TOL = jnp.float32(0.01)
@@ -172,7 +172,7 @@ def main() -> None:
     parser.add_argument("--smoke", action="store_true", help="Smoke run (K=3 repeats)")
     args = parser.parse_args()
 
-    K = 3 if args.smoke else 7
+    K = 7 if args.smoke else 25
     smoke_tag = " *(smoke)*" if args.smoke else ""
 
     print()

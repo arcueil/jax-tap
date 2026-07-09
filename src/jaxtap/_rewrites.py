@@ -192,13 +192,25 @@ def rewrite_while(
         # vmap(while_loop), JAX runs max(trip_counts) joint iterations for ALL
         # lanes; lanes that have already finished execute the body with stale
         # carry values ("ghost iterations"), and active is False for those
-        # lanes.  We pass active to tap_cb so the host-side _host closure can
-        # drop ghost events before constructing a TapEvent.
+        # lanes.
         #
-        # Cost: one extra cond_jaxpr evaluation per body iteration.  For
-        # trivial conds (counter < N) this is free.  For expensive convergence-
-        # check conds (norm(carry) > tol) it doubles the cond work per iteration
-        # — measured in bench/while_cond_overhead.py; see known boundaries.
+        # We pass active as `_while_active` to tap_cb, which encodes it into the
+        # step argument as a SIGN BIT before shipping to debug.callback: real
+        # steps arrive non-negative; ghost steps arrive as -(step+1) < 0.  The
+        # host checks the sign and drops ghosts before constructing TapEvent.
+        # This avoids the ~16 µs/iter overhead of shipping an extra boolean arg
+        # through debug.callback (measured in bench/a1_decompose.py).
+        #
+        # NOTE: lax.cond(active, tap_cb, noop) does NOT work here — under vmap
+        # a per-lane predicate causes lax.cond to evaluate BOTH branches for all
+        # lanes (outputs selected but side effects like debug.callback fire
+        # unconditionally).  The sign-encode host-drop is the correct mechanism.
+        #
+        # API note: jax.core.eval_jaxpr is a canary-watched seam.  It is already
+        # used by cond_fn (line above, same jaxpr) to evaluate the while condition.
+        # If JAX migrates this symbol (e.g. to jax.extend.core), both this site
+        # and cond_fn must be updated together.  As of jax 0.10, eval_jaxpr is
+        # stable and already relied on throughout the walker (_walker.py line 64).
         (active,) = jax.core.eval_jaxpr(cj.jaxpr, cj.consts, *cconsts, *carry)
         # Pass the live step as the 7th argument, None as the 8th (total), and
         # True as the 9th (_in_loop override) so _interp gates primitive taps
@@ -219,7 +231,8 @@ def rewrite_while(
         if emit_carry:
             # tap_cb already has sample_every gating baked in (see verbose()).
             # total=None because while_loop length is unknown at trace time.
-            # _while_active carries the per-lane active mask for ghost filtering.
+            # _while_active carries the per-lane active mask for ghost filtering;
+            # see _base_tap_cb in __init__.py for the sign-encode host-drop logic.
             tap_cb(here, step, *new_carry, total=None, _while_active=active)
         return (new_carry, step + 1)
 

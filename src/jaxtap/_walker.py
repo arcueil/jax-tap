@@ -117,16 +117,17 @@ emission only; the body is always recursed.
 Known boundaries and mitigations
 ---------------------------------
 A1 — vmap(while_loop) carry taps: MITIGATED in fix/a1-cond-gating arc.
-     ``rewrite_while`` now re-evaluates the cond_jaxpr on the pre-body carry
-     to get a per-lane active mask; ghost carry-tap events (from lanes that
-     have already finished) are silently dropped host-side before TapEvent
-     construction — so ``on_step`` and ``alert`` see only real per-lane steps.
+     ``rewrite_while`` re-evaluates the cond_jaxpr on the pre-body carry to
+     get a per-lane active mask.  The mask is encoded as a sign bit in the
+     step argument (ghost lanes: -(step+1)) to avoid shipping an extra boolean
+     via debug.callback (~16 µs/iter overhead avoided).  The host decodes the
+     sign bit and drops ghost events before constructing TapEvent — so
+     ``on_step`` and ``alert`` see only real per-lane steps.
      Residual: primitive taps (``taps=``) inside vmapped while bodies still
      ghost-fire; the active mask is not threaded into ``prim_tap_fn``.
      Extending the mask to prim taps is a future arc.
-     Overhead: the extra cond_jaxpr eval adds ~13 µs/iter unconditionally for
-     all while_loop tapping (vmapped or not); expensive convergence-check conds
-     add ~3-7 µs/iter on top (measured, bench/while_cond_overhead.py).
+     Overhead: ~+4 µs/iter vs. no-A1 baseline (N=2000, K=25,
+     bench/a1_decompose.py).
 
 A3 — remat + grad double-fire: a scan inside a ``jax.checkpoint`` region fires
      its tap once on the forward pass and once on the backward pass (remat

@@ -35,9 +35,12 @@ Initial release. Zero-code-change runtime telemetry for JAX control flow.
   `on_step` and `alert`. Primitive taps (`taps=[...]`) inside vmapped while
   bodies still fire for all joint iterations including ghost ones; extending
   ghost-filtering to primitive taps is future work. The mitigation re-evaluates
-  the cond jaxpr inside each body iteration, adding ~13 µs/iter overhead for
-  all while-loop tapping (vmapped or not); convergence-check conds with real
-  float work add ~3-7 µs/iter on top of that (measured, bench/while_cond_overhead.py).
+  the cond jaxpr inside each body iteration and encodes the per-lane active mask
+  as a sign bit in the step argument to avoid shipping an extra callback scalar.
+  Measured overhead: ~+4 µs/iter vs. no-A1 baseline (N=2000, K=25,
+  bench/a1_decompose.py). The dominant cost is the host-side sign decode; for
+  convergence-check conds (e.g. `norm(carry) > tol`) the extra cond XLA eval
+  is the only additional device cost (bench/while_cond_overhead.py).
 - Taps riding along `grad` observe the forward pass only; tap the
   differentiated function (`tap.verbose(jax.grad(f))`) to observe the
   backward pass.

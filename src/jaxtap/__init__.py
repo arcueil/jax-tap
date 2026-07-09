@@ -655,19 +655,23 @@ def verbose(
     **vmap × while_loop carry taps**: when ``f`` contains a ``while_loop``
     and is wrapped in ``jax.vmap``, carry taps deliver exactly one event per
     real per-lane iteration (not one per joint iteration).  jaxtap re-evaluates
-    the while cond inside the body to compute a per-lane active mask and drops
-    ghost events host-side before constructing ``TapEvent`` — so ``on_step``
-    and ``alert`` only see events from lanes where the cond was still True.
+    the while cond inside the body to compute a per-lane active mask and gates
+    the carry tap with a device-side ``lax.cond(active, tap, noop)`` — ghost
+    lanes never fire ``debug.callback`` at all, so ``on_step`` and ``alert``
+    only see events from lanes where the cond was still True.
 
     **Residual prim-tap ghost-firing**: primitive taps (``taps=[tap.on(...)]``)
     inside a vmapped while body still fire for all joint iterations, including
     ghost ones from finished lanes.  Carry-tap ghost suppression is exact;
     prim-tap suppression is a future arc.
 
-    **While-loop overhead**: the A1 mitigation adds ~13 µs/iter unconditionally
-    to all while-loop tapping (vmapped or not) due to the extra cond evaluation
-    and one additional callback argument.  Expensive convergence-check conds
-    (e.g. ``norm(carry) > tol``) add ~3–7 µs/iter on top
+    **While-loop overhead**: the A1 mitigation adds one extra cond evaluation
+    per body iteration (XLA-compiled, not a Python callback) plus a sign-bit
+    decode in the host closure (~+4 µs/iter vs. no-A1 baseline, measured at
+    N=2000 K=25 in ``bench/a1_decompose.py``).  For trivial conds (counter
+    < N) the cond re-eval is near-zero.  For expensive convergence-check
+    conds (e.g. ``norm(carry) > tol``) the extra eval doubles the cond XLA
+    work but the host-callback overhead is unchanged
     (see ``bench/while_cond_overhead.py``).
 
     **Carry boundary & pytree erasure**: Jaxprs are flat — tracing erases the
@@ -720,8 +724,15 @@ def verbose(
             # so ``select`` runs on-device before the host-boundary crossing.
             # ``total`` is a Python int (or None) passed as a kwarg from the rewrites;
             # it is captured in ``_host`` via closure — not a JAX argument.
-            # ``_while_active`` is a JAX bool (or None) from rewrite_while; when not
-            # None the host drops ghost events from vmap+while_loop iterations.
+            # tap_cb is called INSIDE the traced computation (scan/while body),
+            # so ``select`` runs on-device before the host-boundary crossing.
+            # ``total`` is a Python int (or None) passed as a kwarg from the rewrites;
+            # it is captured in ``_host`` via closure — not a JAX argument.
+            # ``_while_active`` is a JAX bool (or None) from rewrite_while.  When not
+            # None, we encode active into the step arg using the sign bit: real steps
+            # ship as-is (non-negative); ghost lanes ship -(step+1) (always negative).
+            # The host decodes: raw<0 means ghost → drop silently.  This avoids the
+            # ~15 µs/iter overhead of shipping an extra callback arg.
             def _base_tap_cb(
                 path: str,
                 step: Any,
@@ -740,17 +751,18 @@ def verbose(
                 sel_tree = jax.tree_util.tree_structure(selected)
 
                 if _while_active is not None:
-                    # A1 mitigation: append active mask as the last callback arg.
-                    # On the host, drop the event before constructing TapEvent when
-                    # the lane is inactive (ghost vmap+while iteration).
-                    def _host(step_: Any, *flat_vals_and_active: Any) -> None:
-                        *flat_vals, active_ = flat_vals_and_active
-                        if not active_.item():
+                    # A1 mitigation: encode active into the step sign bit so no extra
+                    # callback arg is needed.  ghost lane → step becomes -(step+1).
+                    active_step = jax.lax.select(
+                        _while_active, step, -(step + jnp.int32(1))
+                    )
+
+                    def _host(step_: Any, *flat_vals: Any) -> None:
+                        raw = step_.item()
+                        if raw < 0:
                             return  # ghost vmap+while lane — drop silently
                         value = jax.tree_util.tree_unflatten(sel_tree, list(flat_vals))
-                        event = TapEvent(
-                            path=path, step=step_.item(), value=value, total=total
-                        )
+                        event = TapEvent(path=path, step=raw, value=value, total=total)
                         # alert fires BEFORE on_step; both are independent.
                         if alert is not None:
                             _fire_carry_alert(
@@ -760,7 +772,7 @@ def verbose(
                             _guard(on_step, event)
 
                     jax.debug.callback(
-                        _host, step, *flat_selected, _while_active, ordered=False
+                        _host, active_step, *flat_selected, ordered=False
                     )
                 else:
 
@@ -783,8 +795,8 @@ def verbose(
             # tap_cb is called INSIDE the traced computation; ``jax.debug.callback``
             # ships the carry leaves to the host.  ``path`` is a static Python string
             # captured in the closure.
-            # ``_while_active`` is a JAX bool (or None) from rewrite_while; when not
-            # None the host drops ghost events from vmap+while_loop iterations.
+            # ``_while_active`` is a JAX bool (or None) from rewrite_while.  When not
+            # None, active is encoded into the step sign bit (see select= variant above).
             def _base_tap_cb(
                 path: str,
                 step: Any,
@@ -793,17 +805,16 @@ def verbose(
                 _while_active: Any = None,
             ) -> None:
                 if _while_active is not None:
-                    # A1 mitigation: append active mask as last callback arg.
-                    def _host(step_: Any, *leaves_and_active: Any) -> None:
-                        *leaves, active_ = leaves_and_active
-                        if not active_.item():
+                    # A1 mitigation: sign-encode active into step; no extra callback arg.
+                    active_step = jax.lax.select(
+                        _while_active, step, -(step + jnp.int32(1))
+                    )
+
+                    def _host(step_: Any, *leaves: Any) -> None:
+                        raw = step_.item()
+                        if raw < 0:
                             return  # ghost vmap+while lane — drop silently
-                        event = TapEvent(
-                            path=path,
-                            step=step_.item(),
-                            value=tuple(leaves),
-                            total=total,
-                        )
+                        event = TapEvent(path=path, step=raw, value=leaves, total=total)
                         # alert fires BEFORE on_step; both are independent.
                         if alert is not None:
                             _fire_carry_alert(
@@ -812,9 +823,7 @@ def verbose(
                         if on_step is not None:
                             _guard(on_step, event)
 
-                    jax.debug.callback(
-                        _host, step, *carry_leaves, _while_active, ordered=False
-                    )
+                    jax.debug.callback(_host, active_step, *carry_leaves, ordered=False)
                 else:
 
                     def _host(step_: Any, *leaves: Any) -> None:
