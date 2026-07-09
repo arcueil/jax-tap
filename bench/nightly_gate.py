@@ -28,6 +28,10 @@ includes full jaxtap machinery (step routing, event construction); the manual-pa
 arm mirrors the exact payload (step int32 + dim-8 float32 carry) without jaxtap,
 measuring only the host-callback floor.
 
+CRITICAL: The self-normalizing property only holds at full N (≥10,000 steps).
+At small N (smoke mode, N=100), trace/dispatch overhead does not amortize and
+machinery numbers are ~7× inflated and not comparable; smoke mode is report-only.
+
 Rationale for the 15.0 µs threshold:
   - Current machinery ≈ 8.2 µs (post perf/emission-machinery)
   - Known int()-regression class measured 21 µs
@@ -234,7 +238,14 @@ def main() -> None:
             )
 
     # Exit with appropriate code
-    if passed:
+    if args.smoke:
+        # Smoke mode is report-only: trace/dispatch overhead does not amortize at small N
+        print(
+            "\n⊘ Smoke mode (N=100): threshold not applied — use full run (N=10,000) to gate.",
+            file=sys.stderr,
+        )
+        sys.exit(0)
+    elif passed:
         print(
             f"\n✓ Machinery {machinery_us:.3f} µs ≤ {threshold_us:.1f} µs threshold",
             file=sys.stderr,

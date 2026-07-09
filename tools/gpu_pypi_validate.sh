@@ -43,7 +43,8 @@ for d in demo/*.py; do
 done
 
 echo "=== BENCH (GPU0, wheel from PyPI) ===" >> "$OUT"
-CUDA_VISIBLE_DEVICES=0 ../env/bin/python bench/nightly_gate.py >> "$OUT" 2>&1
+# report-only on GPU: machinery threshold is CPU-calibrated; GPU numbers are uncharacterized
+CUDA_VISIBLE_DEVICES=0 ../env/bin/python bench/nightly_gate.py >> "$OUT" 2>&1 || true
 CUDA_VISIBLE_DEVICES=0 ../env/bin/python bench/progress_bar.py >> "$OUT" 2>&1
 
 echo "DONE_PYPI_GPU" >> "$OUT"
