@@ -38,6 +38,8 @@ def inner_solve(m, z0):
     def body(c):
         z, it, _ = c
         z = z - 0.6 * jnp.tanh(z - m)  # damped Newton step (bounded move)
+        # the while-loop tap acts AS IF we injected `print(it, |grad|)` right
+        # here, every iteration, four levels deep — without editing anything.
         return (z, it + 1, jnp.sinh(z - m))
 
     z, it, g = jax.lax.while_loop(cond, body, (z0, 0, jnp.sinh(z0 - m)))
