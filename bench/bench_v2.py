@@ -212,6 +212,31 @@ def arm_jaxtap(N: int, sample_every: int = 10, lanes: int = 1) -> tuple:
     return jax.jit(fn), make_init(lanes)
 
 
+def arm_jaxtap_progress(N: int, sample_every: int = 10, lanes: int = 1) -> tuple:
+    """tap.verbose with empty-payload select — the progress-bar idiom.
+
+    ``select=lambda leaves: ()`` ships ZERO carry bytes across the host boundary.
+    The TapEvent still carries path/step/total for tqdm-style progress; it simply
+    has an empty value field.  This is the recommended idiom for monitoring that
+    only cares about WHEN a step fired, not WHAT the carry looks like.
+
+    Overhead reduces to: amortised callback cost (near the step-only floor of
+    ~33–40 µs, same as manual-progress) + device-side lax.cond gate.
+    """
+
+    def f(state):
+        return lax.scan(leapfrog_body, state, None, length=N)[0]
+
+    ft = tap.verbose(
+        f,
+        on_step=noop_on_step,
+        sample_every=sample_every,
+        select=lambda leaves: (),  # empty payload — zero bytes cross host boundary
+    )
+    fn = jax.vmap(ft) if lanes > 1 else ft
+    return jax.jit(fn), make_init(lanes)
+
+
 def arm_debug_carry_se1(N: int) -> tuple:
     """Carry tap every step with a scalar select.
 
@@ -334,6 +359,11 @@ def print_tables(rows: list[dict], bare_med: float, bare_min: float, smoke: bool
         " device-side `lax.cond(step % k == 0, fire, noop)` gate; full (q, p) carry shipped on fire"
     )
     print(
+        "- **jaxtap-se10/100-progress**: `tap.verbose(f, on_step=noop, sample_every=k,"
+        " select=lambda leaves: ())` — progress-bar idiom; ZERO bytes cross the host boundary;"
+        " TapEvent.value=(); callback cost ≈ step-only floor (~33–40 µs/event)"
+    )
+    print(
         "- **debug-carry-se1**: `tap.verbose(f, sample_every=1, select=lambda l: l[0][0])`"
         " — scalar select (q[0]) minimises data transit; isolates FREQUENCY cost (not carry-size cost)"
     )
@@ -409,6 +439,27 @@ def main() -> None:
         rows.append(dict(scenario="progress", arm=f"jaxtap-se{se}", se=se, lanes=1, med=med, mn=mn))
         print(
             f"  jaxtap-se{se:<3}:       {med:.3f} µs/step  (+{med - bare_med:.2f} µs = {(med - bare_med) / bare_med * 100:.1f}% overhead)",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.stdout.flush()
+
+    # progress idiom: empty-payload select
+    for se in [10, 100]:
+        fn, init = arm_jaxtap_progress(N, sample_every=se)
+        med, mn = warmup_and_time(fn, init, N, K)
+        rows.append(
+            dict(
+                scenario="progress",
+                arm=f"jaxtap-se{se}-progress",
+                se=se,
+                lanes=1,
+                med=med,
+                mn=mn,
+            )
+        )
+        print(
+            f"  jaxtap-se{se}-progress:{med:.3f} µs/step  (+{med - bare_med:.2f} µs = {(med - bare_med) / bare_med * 100:.1f}% overhead)",
             file=sys.stderr,
             flush=True,
         )

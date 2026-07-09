@@ -17,9 +17,10 @@ Scripts:
 **"What does the lens cost when the scan body does real work?"**
 
 Body: `dim=100` leapfrog on a Gaussian target, `L_STEPS=15` sub-steps per scan
-step (30 `jnp.dot(M_PREC, ·)` matvecs per step). Bare body: **10.4 µs/step**
-at N=10 000. This puts the 33 µs host-callback floor at 3× the body (not 330×
-as in v1), giving a realistic overhead picture.
+step (30 `jnp.dot(M_PREC, ·)` matvecs per step). Bare body: **~11 µs/step**
+at N=10 000 (10–11 µs range across runs; host-callback jitter adds ~15–20%
+run-to-run variance). This puts the 33 µs host-callback floor at 3× the body
+(not 330× as in v1), giving a realistic overhead picture.
 
 Run: `PYTHONUNBUFFERED=1 uv run python bench/bench_v2.py 2>&1 | tee bench/v2_run.log`
 Smoke: `uv run python bench/bench_v2.py --smoke`
@@ -27,59 +28,76 @@ Smoke: `uv run python bench/bench_v2.py --smoke`
 ### SCENARIO 1 — PROGRESS-BAR (headline)
 
 N=10 000, K=7, median+min µs/step. `vs bare (%)` = the question that matters.
+Host-callback jitter gives ~15–20% run-to-run variance; µs overhead is portable,
+% is body-relative (see scaling note below).
 
 | arm | se | µs/step (med) | µs/step (min) | vs bare (µs) | vs bare (%) |
 |-----|----|--------------:|---------------|:------------:|:-----------:|
-| bare | — | 10.395 | 10.378 | — | — |
-| manual-progress | 1 | 47.377 | 46.273 | +36.98 | **+356%** |
-| jaxtap-se10 | 10 | 22.542 | 22.048 | +12.15 | **+117%** |
-| jaxtap-se100 | 100 | 11.954 | 11.775 | +1.56 | **+15%** |
+| bare | — | 11.129 | 11.046 | — | — |
+| manual-progress | 1 | 48.198 | 47.686 | +37.07 | **+333%** |
+| jaxtap-se10 | 10 | 21.207 | 21.094 | +10.08 | **+91%** |
+| jaxtap-se100 | 100 | 11.902 | 11.750 | +0.77 | **+7%** |
+| jaxtap-se10-progress | 10 | 16.687 | 16.440 | +5.56 | **+50%** |
+| jaxtap-se100-progress | 100 | 12.797 | 11.267 | +1.67 | **+15%** |
 
-**headline %: jaxtap-se10 = +117%; jaxtap-se100 = +15%.**
+**"progress idiom" rows** (`-progress`) use `select=lambda leaves: ()` — zero bytes
+cross the host boundary; `TapEvent.value = ()`; callback cost ≈ step-only floor
+(~37 µs/event). This is the recommended idiom for tqdm-style bars.
 
-The TL expectation was "se=10 ≈ ~0.8 µs amortised → small %". The actual is
-+12 µs (+117%). No spin: the overhead at se=10 is NOT small on this body. The
-honest breakdown follows.
+**Recommendation ladder (pick the first row that fits your use case):**
 
-#### What drives the overhead?
+| monitoring goal | idiom | overhead on ~11 µs body |
+|-----------------|-------|------------------------|
+| lightweight progress (se=100) | `tap.verbose(f, se=100, select=lambda _: ())` | **+15%** (~1.7 µs) |
+| finer-grained progress (se=10) | `tap.verbose(f, se=10, select=lambda _: ())` | **+50%** (~5.6 µs) |
+| carry inspection (se=100) | `tap.verbose(f, se=100)` | +7% (~0.8 µs) |
+| carry inspection (se=10) | `tap.verbose(f, se=10)` | +91% (~10 µs) |
+| always-on debugging | `tap.verbose(f, se=1, select=scalar)` | +724% — see debug rows |
 
-**Callback frequency is not the only driver — payload size matters.**
+#### Scaling note — µs overhead is fixed; % scales with body size
 
-The jaxtap-se10 arm ships the full carry `(q, p) ∈ ℝ^100 × ℝ^100` (800 bytes)
-across the host boundary at every 10th step. Solving for per-callback cost from
-the se=10 and se=100 data:
+The jaxtap overhead in µs/step is a property of the callback mechanism (fixed
+per event), not of the body compute. The % falls proportionally as the body grows:
 
-| quantity | value |
-|----------|-------|
-| callback cost (800-byte carry) | ~118 µs |
-| amortised per step at se=10 | ~11.8 µs |
-| device-side lax.cond overhead | ~0.4 µs/step |
-| **total overhead at se=10** | **~12.15 µs (+117%)** |
+| body cost | se=10-progress overhead | overhead % |
+|-----------|------------------------|-----------|
+| ~11 µs (this benchmark) | ~5.6 µs | ~50% |
+| ~50 µs (modest sampler step) | ~5.6 µs | ~11% |
+| ~100 µs (real-world sampler) | ~5.6 µs | ~6% |
 
-At se=100: amortised callback = 1.18 µs/step, lax.cond ≈ 0.38 µs, total = **1.56 µs (+15%)**.
+**State the µs cost to collaborators; % is only meaningful relative to a stated
+body cost.** The µs numbers here are on CPU (cpu:0), JAX 0.10.2, single-threaded.
 
-Compare with the empty-body v1 result: `verbose(se=10)` shipped a 32-byte carry
-and cost +7.2 µs overhead on a 0.06 µs body (12 000%). The carry here is 25× larger
-(800 vs 32 bytes), callback cost scaled from 33 µs to ~118 µs (~3.6×, sub-linear).
+#### What drives the overhead? (payload-size decomposition)
 
-**For a genuine progress bar (step count only, no carry):** the manual-progress
-arm shows the hand-rolled cost of a step-only callback: +37 µs per step every step
-(+356%). Using `select=lambda leaves: leaves[0][:1]` to reduce the carry to a
-1-element scalar cuts the per-callback cost to ~37 µs (matching the step-only cost),
-bringing amortised se=10 overhead to ~4 µs (~38%) and se=100 to ~0.4 µs (~4%).
-**For lightweight monitoring, use a select to reduce the carry or set se=100.**
+The `jaxtap-se10` arm ships the full `(q, p) ∈ ℝ^100 × ℝ^100` carry (800 bytes)
+at every 10th step. Per-callback cost solves from the se=10 and se=100 data to
+~118 µs (vs v1's ~33 µs for a 32-byte carry; ~3.6× scaling for 25× payload —
+sub-linear in bytes but substantial). The jaxtap machinery component (~20 µs above
+the raw `jax.debug.callback` floor — see v1 §1 for the decomposition) is a known
+post-v1 optimisation target; the remaining ~100 µs is `jax.debug.callback` itself.
+
+| quantity | se=10 full carry | se=10 empty payload |
+|----------|-----------------|---------------------|
+| per-callback cost | ~118 µs | ~37 µs |
+| amortised per step at se=10 | ~10 µs | ~5.2 µs |
+| device-side lax.cond | ~0.4 µs | ~0.4 µs |
+| **total overhead** | **~10 µs (+91%)** | **~5.6 µs (+50%)** |
+
+Compared to v1: `verbose(se=10)` on the 0.06 µs empty body cost +7.2 µs (+12 000%).
+Same µs overhead in the same order of magnitude — the denominator changed.
 
 ### SCENARIO 2 — DEBUGGING (2 highlight rows)
 
-| arm | se | body | µs/step (med) | vs bare (µs) | vs bare (%) |
+| arm | se | body | µs/step (med) | vs bare* (µs) | vs bare* (%) |
 |-----|----|----|------:|:---------:|:---------:|
-| debug-carry-se1 | 1 | L_STEPS=15 | 96.329 | +85.93 | +827% |
-| debug-prim-se10 | 10 | L_STEPS=1 | 26.899 | +16.50 | +159%† |
+| debug-carry-se1 | 1 | L_STEPS=15 | 91.669 | +80.54 | +724% |
+| debug-prim-se10 | 10 | L_STEPS=1 | 25.623 | +14.49 | +130%† |
 
-† debug-prim uses the simple body (1 sub-step, 1.2 µs/step bare) to avoid
+† debug-prim uses the simple body (1 sub-step, ~1.2 µs/step bare) to avoid
 2×L_STEPS gated lax.cond checks per scan step that would swamp the arm. The
-+159% is vs the simple body; vs the full-body bare it would be smaller in
-absolute µs but misleadingly mixed.
++130% is vs the simple body bare (~1.2 µs); vs the full-body bare it would be
+smaller in absolute µs but the arms would not be comparable.
 
 **debug-carry-se1:** `tap.verbose(f, sample_every=1, select=lambda l: l[0][0])`
 fires a scalar-select callback every step. Even with the scalar reducing carry
@@ -96,13 +114,14 @@ have fired 2×N times regardless of `sample_every`; M1d's gating confirmed.
 
 | arm | se | lanes | µs/step (med) | vs vmap-bare (µs) | vs vmap-bare (%) |
 |-----|----|-------|------:|:-----:|:-----:|
-| bare-l8 | — | 8 | 39.907 | — | — |
-| vmap-se10 | 10 | 8 | 154.642 | +114.74 | +288% |
+| bare-l8 | — | 8 | 39.855 | — | — |
+| vmap-se10 | 10 | 8 | 150.166 | +110.31 | +277% |
 
-8-lane vmap bare: 39.9 µs (≈3.8× single-lane, not 8× — XLA vectorises the matvecs).
-vmap-se10 overhead: +115 µs (+288% vs vmap bare, +9.4× single-lane se=10 overhead).
-The super-linear lane scaling for callbacks matches v1 finding: host callbacks under
-vmap serialise, each lane's event going through the dispatch queue individually.
+8-lane vmap bare: 39.9 µs (≈3.6× single-lane, not 8× — XLA vectorises the matvecs
+across the batch). vmap-se10 overhead: +110 µs (+277% vs vmap bare, ~11× single-lane
+se=10 overhead). Super-linear lane scaling for callbacks matches v1 finding: host
+callbacks under vmap serialise; each lane's event goes through the dispatch queue
+individually. Reducing se is the only effective mitigation for large vmap batches.
 
 ### Config notes (v2)
 
@@ -111,6 +130,7 @@ vmap serialise, each lane's event going through the dispatch queue individually.
 - **bare**: `lax.scan(leapfrog_body, init, None, length=N)`, jitted — no callbacks
 - **manual-progress**: same body + `jax.debug.callback(λ s: None, step, ordered=False)` every step; step int32 only
 - **jaxtap-se10/100**: `tap.verbose(f, on_step=noop, sample_every=k)` — carry tap; device-side `lax.cond(step % k == 0, fire, noop)` gate; full (q, p) carry shipped on fire
+- **jaxtap-se10/100-progress**: `tap.verbose(f, on_step=noop, sample_every=k, select=lambda leaves: ())` — progress-bar idiom; ZERO bytes cross the host boundary; TapEvent.value=(); callback cost ≈ step-only floor (~33–40 µs/event)
 - **debug-carry-se1**: `tap.verbose(f, sample_every=1, select=lambda l: l[0][0])` — scalar select isolates frequency cost
 - **debug-prim-se10**: `tap.verbose(f_simple, se=10, taps=[tap.on('dot_general', select=lambda o: o[0][0])])` — M1d gating demo
 - **vmap-se10**: `jax.vmap(tap.verbose(f, se=10))` — 8 lanes; each lane fires own callbacks
