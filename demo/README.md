@@ -125,15 +125,19 @@ program's steady-state run (0.32s, 3% agreement).
 **Caveat:** the *ideal* is a **jit-event tap** class (trace/compile/execute
 timestamps — roadmap); event-arrival timing is the shipped approximation.
 
-### 🚧 `backward_pass_vjp_nan.py` — the NaN jax-tap does NOT catch *(planned)*
-**Bug pattern:** a function like `hypot` evaluated at `(0, 0)` has a clean
-forward value but a NaN in its **backward (gradient) pass** — a well-known
-sharp edge of automatic differentiation.
-**What it shows — honestly:** a forward-pass tap does NOT and CANNOT see
-this; backward-pass taps are gradient-transform territory with undefined
-semantics in every comparable tool. The file proves the boundary rather than
-faking a catch — jax-tap states its limits.
-**Tap class:** documented boundary (out of scope by design).
+### 🚧 `backward_pass_vjp_nan.py` — the NaN born in the backward pass
+**Bug pattern:** a hand-rolled `sqrt(c**2 + x**2)` is finite forward, but its
+derivative `c/sqrt(...)` is 0/0 = NaN at the origin — the NaN exists only in
+the backward pass. (Modern `jnp.hypot` ships a guarded VJP for exactly this
+reason — the demo reproduces the pre-fix form.)
+**What it shows — honestly, in two acts:** (1) **the boundary**: forward taps
+on `loss()` stay SILENT — taps riding along a grad transform observe the
+forward pass only, by documented contract; jax-tap cannot see this bug from
+the forward side. (2) **the escape hatch**: `jax.grad(loss)` is itself just a
+function whose jaxpr contains the backward pass as ordinary primitives — tap
+THE DIFFERENTIATED FUNCTION and `watch_nan("div")` fires at the 0/0's birth
+site with an address: `[tap] FAIL scan[0]/div[0] 0/3: NaN/Inf`.
+**Tap class:** documented boundary + the tap-grad(f)-itself workaround.
 
 ## Why this directory exists
 
