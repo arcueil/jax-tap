@@ -15,23 +15,29 @@
 """
 jaxtap collectors — host-side telemetry sinks.
 
-All collectors are plain ``on_step``-compatible callables; none imports pandas
-at module load so the core package imports with JAX only.
+This module provides callables compatible with the ``on_step`` parameter of
+:func:`jaxtap.verbose` and :func:`jaxtap.record`. All collectors are plain
+callables that accept :class:`jaxtap.TapEvent` objects.
 
-Classes
--------
-FlightRecorder
-    Accumulates TapEvents in memory; ``.df()`` exports a long-format pandas
-    DataFrame.
-JSONLWriter
-    Writes one JSON object per TapEvent to a JSONL file; use as a context
-    manager or close manually.
+No collector imports pandas at module load — the core package depends only on
+JAX and numpy. The optional pandas dependency is imported only when
+:meth:`FlightRecorder.df` is called.
 
-Functions
----------
-read_jsonl(path) -> list[TapEvent]
-    Reads a JSONL file written by :class:`JSONLWriter` and reconstructs a
-    list of :class:`TapEvent` objects.
+Notes
+-----
+Use collectors with the B-form of :func:`jaxtap.record`::
+
+    recorder = FlightRecorder()
+    tapped_f = jaxtap.verbose(f, on_step=recorder)
+    tapped_f(*args)
+    df = recorder.df()
+
+Or use JSONLWriter as a context manager for streaming output::
+
+    with JSONLWriter("events.jsonl") as w:
+        tapped_f = jaxtap.verbose(f, on_step=w)
+        tapped_f(*args)
+    events = read_jsonl("events.jsonl")
 """
 
 from __future__ import annotations
@@ -55,18 +61,39 @@ class FlightRecorder:
     """
     On-step callable that accumulates :class:`TapEvent` objects in memory.
 
-    Usage::
+    This class acts as a plain callable compatible with the ``on_step``
+    parameter of :func:`jaxtap.verbose` and :func:`jaxtap.record`. It stores
+    every :class:`TapEvent` delivered to it in an internal list, accessible
+    via the ``.events`` attribute or exported to a pandas DataFrame via
+    :meth:`.df`.
 
-        recorder = FlightRecorder()
-        tapped = tap.verbose(f, on_step=recorder)
-        tapped(*args)
-        df = recorder.df()
+    Attributes
+    ----------
+    events : list
+        List of :class:`TapEvent` objects accumulated since instantiation
+        (or since the last manual clear). Readable at any time; appended to
+        as events fire.
 
-    **vmap note**: under ``jax.vmap``, a batched-carry tap fires once per
-    vmap lane with no lane identifier.  ``.df()`` will contain N rows per
-    ``(path, step)`` pair — one per lane.  Lane identity is NOT recorded
+    Notes
+    -----
+    **vmap behavior**: under ``jax.vmap``, a batched-carry tap fires once per
+    vmap lane with no lane identifier. ``.df()`` will contain N rows per
+    ``(path, step)`` pair — one per lane. Lane identity is NOT recorded
     (fabricating it would require a lane-index injection that jax-tap
     deliberately avoids for neutrality).
+
+    Examples
+    --------
+    Accumulate events and export to pandas::
+
+        import jaxtap as tap
+
+        recorder = tap.FlightRecorder()
+        tapped = tap.verbose(f, on_step=recorder)
+        tapped(*args)
+
+        df = recorder.df()  # pandas.DataFrame with columns: path, step, value, ...
+        print(df)
     """
 
     def __init__(self) -> None:
@@ -77,25 +104,50 @@ class FlightRecorder:
 
     def df(self) -> "pd.DataFrame":
         """
-        Return a long-format pandas DataFrame.
+        Return a long-format pandas DataFrame of accumulated events.
 
-        Columns
+        Exports all :class:`TapEvent` objects to a pandas DataFrame, with one
+        row per event. The pytree structure of ``TapEvent.value`` is flattened
+        into individual columns using :func:`jaxtap.collectors._value_to_columns`.
+
+        Returns
         -------
-        path, step
-            Always present.
-        value
-            Present when ``TapEvent.value`` is a scalar or a 1-element
-            sequence.
-        value_0, value_1, …
-            Present when the value is a multi-element sequence.
-        <key>
-            Present (one per key) when the value is a ``dict``.
+        pd.DataFrame
+            A DataFrame with the following columns:
+
+            - ``path`` : str — the event's stable address
+            - ``step`` : int — the enclosing loop step (or -1 for primitives)
+            - Value columns (structure-dependent):
+
+              - ``value`` : present when ``TapEvent.value`` is a scalar or
+                1-element sequence
+              - ``value_0``, ``value_1``, … : present when the value is a
+                multi-element sequence (e.g., tuple or list)
+              - Individual keys (e.g., ``a``, ``b``) : present when the value
+                is a dict
 
         Raises
         ------
         ImportError
-            When pandas is not installed.  Install with
-            ``pip install jax-tap[pandas]`` or ``pip install pandas``.
+            When pandas is not installed. Install with::
+
+                pip install jax-tap[pandas]
+                # or
+                pip install pandas
+
+        Examples
+        --------
+        Export events to a DataFrame for analysis::
+
+            recorder = tap.FlightRecorder()
+            tapped = tap.verbose(f, on_step=recorder)
+            tapped(*args)
+
+            df = recorder.df()
+            print(df[["path", "step", "value"]])
+            #           path  step     value
+            # 0      scan[0]     0         1.5
+            # 1      scan[0]     1         2.5
         """
         try:
             import pandas as pd
@@ -142,30 +194,50 @@ def _leaf_to_python(v: Any) -> Any:
 
 class JSONLWriter:
     """
-    On-step callable that writes one JSON object per :class:`TapEvent` to a
-    JSONL file.
+    On-step callable that writes one JSON object per :class:`TapEvent` to a file.
 
-    Use as a context manager to ensure the file is closed::
+    Writes telemetry events to a JSONL file (one JSON object per line) for
+    streaming or batch analysis. Each line is a self-contained JSON object
+    with the event's path, step, and a JSON-safe representation of the value.
 
-        with JSONLWriter("log.jsonl") as w:
-            tapped = tap.verbose(f, on_step=w)
-            tapped(*args)
+    The ``value_kind`` field encodes the original Python container type
+    (scalar, tuple, or dict) so :func:`read_jsonl` can reconstruct the value
+    with the same structure (see Notes below).
 
-    Or close manually::
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Path to the JSONL file. The file is created if it does not exist;
+        if it exists, it is truncated.
 
-        w = JSONLWriter("log.jsonl")
-        tapped = tap.verbose(f, on_step=w)
-        tapped(*args)
-        w.close()
+    Notes
+    -----
+    **File I/O**: The file is opened in write mode at instantiation. Use as a
+    context manager to ensure it is closed on exit, or call :meth:`.close`
+    manually.
 
-    JSONL format (one JSON object per line)::
+    **JSONL format**: Each line is a JSON object::
 
         {"path": "scan[0]", "step": 0, "value_kind": "tuple", "value": [1.0, 2.0]}
         {"path": "scan[0]", "step": 1, "value_kind": "scalar", "value": 3.5}
         {"path": "scan[0]", "step": 2, "value_kind": "dict", "value": {"a": 1.0}}
 
-    ``value_kind`` encodes the original Python container type so
-    :func:`read_jsonl` can reconstruct a value with the same structure.
+    ``value_kind`` is one of ``"scalar"``, ``"tuple"``, or ``"dict"``.
+    JAX/numpy arrays are converted to Python scalars or lists.
+
+    Examples
+    --------
+    Write events to a file::
+
+        with tap.JSONLWriter("events.jsonl") as w:
+            tapped = tap.verbose(f, on_step=w)
+            tapped(*args)
+
+    Read the file back::
+
+        events = tap.read_jsonl("events.jsonl")
+        for event in events:
+            print(f"{event.path} step {event.step}: {event.value}")
     """
 
     def __init__(self, path: "str | Path") -> None:
@@ -184,7 +256,15 @@ class JSONLWriter:
         self._file.flush()
 
     def close(self) -> None:
-        """Flush and close the underlying file."""
+        """Flush and close the underlying JSONL file.
+
+        This method flushes any pending writes and closes the file handle.
+        After calling :meth:`.close`, the writer cannot be used to write
+        more events.  The file is then ready for reading (e.g., with
+        :func:`read_jsonl`).
+
+        Calling :meth:`.close` more than once is safe (idempotent).
+        """
         self._file.close()
 
     def __enter__(self) -> "JSONLWriter":
@@ -214,16 +294,42 @@ def read_jsonl(path: "str | Path") -> list:
     """
     Read a JSONL file written by :class:`JSONLWriter`.
 
-    Returns a list of :class:`TapEvent` objects with values reconstructed as:
-
-    - ``"tuple"`` kind → Python tuple of numpy scalars / arrays
-    - ``"dict"`` kind → dict with numpy scalar / array values
-    - ``"scalar"`` kind → numpy scalar
+    Parses each line as a JSON object, reconstructs :class:`TapEvent` objects,
+    and returns them as a list. The ``value_kind`` field in each JSON object
+    determines how to reconstruct the pytree structure of the ``value`` field.
 
     Parameters
     ----------
-    path:
-        Path to the JSONL file.
+    path : str or pathlib.Path
+        Path to the JSONL file (created by :class:`JSONLWriter`).
+
+    Returns
+    -------
+    list
+        A list of :class:`TapEvent` objects with values reconstructed as:
+
+        - ``"tuple"`` kind → Python tuple of numpy scalars / arrays
+        - ``"dict"`` kind → dict with numpy scalar / array values
+        - ``"scalar"`` kind → numpy scalar
+
+    Raises
+    ------
+    FileNotFoundError
+        If the file does not exist.
+    json.JSONDecodeError
+        If a line in the file is not valid JSON.
+
+    Examples
+    --------
+    Write events, then read them back::
+
+        with tap.JSONLWriter("events.jsonl") as w:
+            tapped = tap.verbose(f, on_step=w)
+            tapped(*args)
+
+        events = tap.read_jsonl("events.jsonl")
+        for event in events:
+            print(f"Path: {event.path}, Step: {event.step}, Value: {event.value}")
     """
     from . import TapEvent  # import here to avoid circular dependency at module load
 
