@@ -73,13 +73,15 @@ Also demonstrates two real seams: a solve needing 0 iterations emits no
 heartbeat, and one `select` serves every tapped node (branch on carry arity).
 **Tap class:** inner while-loop carry tap (heartbeat + exit state).
 
-### ✅ `multinomial_da_bimodal.py` — acceptance secretly bimodal *(planned)*
-**Bug pattern:** a step-size controller consumes an acceptance statistic whose
-distribution is secretly bimodal (values clustering at ≈0 and ≈1). The scalar
-mean the controller sees looks reasonable, so tuning oscillates and never
-converges — and nothing errors.
-**Will show:** a carry-tap streams the per-step acceptance; the collected
-values reveal the bimodality on sight.
+### ✅ `multinomial_da_bimodal.py` — acceptance secretly bimodal
+**Bug pattern:** a step-size controller tunes toward a target MEAN acceptance,
+but the per-step values it consumes are secretly bimodal ({~0.02, ~0.95},
+nothing between). The mean sits exactly at target while describing NO actual
+step — tuning hunts between the modes forever, and nothing errors.
+**What it shows:** the controller's own carry holds the last acceptance; a
+carry-tap streams it and a five-bucket histogram shows the split on sight
+(mean 0.80 'on target' vs 325/0/0/0/1675 buckets; ε swings ~2× forever).
+The lesson: the tap surfaces the DISTRIBUTION the code only ever averaged.
 **Tap class:** carry tap on controller state.
 
 ### ✅ `treedepth_saturation.py` — the saturated-chain blind spot *(planned)*
