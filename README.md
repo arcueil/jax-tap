@@ -1,4 +1,4 @@
-# jax-tap
+# jax-tap (pronounced "just tap")
 
 **Make print-debugging great again.**
 
