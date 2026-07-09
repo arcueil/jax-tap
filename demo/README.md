@@ -31,11 +31,16 @@ it uses, and where the ideal class is not yet built, says so plainly.
 log-density silently produced a non-finite factor as warmup drove the kernel
 ill-conditioned; dual-averaging shrank the step size to "dodge" the NaN, so the
 chain froze while R-hat and divergence checks still said "converged."
-**What it shows:** without jaxtap you see only a frozen step size; a carry-tap
-whose `select` ships one `isfinite(L)` bool per step localizes the **first
-non-finite step** instantly. Also shows the trap is float32-specific (float64
-defers it far later).
-**Tap class:** control-flow / carry tap (reduce-on-device to a bool).
+**What it shows:** the sampler body contains ZERO logging code — it just
+defines `L = jnp.linalg.cholesky(M)`. The unmodified call is wrapped in
+`with tap.record(taps=[tap.on("cholesky", ...)], on_step=announce)`: the tap
+observes the ACTUAL factor by primitive kind, and `announce` fires **live,
+mid-loop** — the non-finite factor is loudly reported BEFORE the scan finishes,
+at its true step and address (`scan[0]/jit[0]/cholesky[0]`). Delete the `with`
+block and nothing was ever there. Also shows the trap is float32-specific
+(float64 defers it far later).
+**Tap class:** primitive tap (`tap.on("cholesky")`, reduce-on-device to one
+bool) via the A-shell `with` form + live `on_step` streaming.
 
 ### ✅ `lowrank_metric_stuck.py` — the metric that never moved *(planned)*
 **Bug (#949, parked 7 weeks):** an un-inverted score covariance left the
