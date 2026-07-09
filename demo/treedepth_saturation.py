@@ -62,11 +62,29 @@ def main() -> None:
           f"{float(jnp.abs(xs).mean()):.2f}, no warnings anywhere.")
 
     # ---------------- with jax-tap: live tripwire + post-hoc fraction ----------------
+    # How the tap works, end to end (the backend in 5 steps):
+    #  1. `with tap.record(...)` patches jax.lax.scan; the next scan call is
+    #     intercepted and its program rebuilt with a step counter + a tap site
+    #     at the body's return. Your function is never edited.
+    #  2. DEVICE, every draw: `select` runs INSIDE the compiled program —
+    #     here it picks leaves[1] (the depth) from the carry the body returns.
+    #  3. DEVICE→HOST: jax.debug.callback ships ONLY those selected bytes
+    #     (gated by sample_every, when set).
+    #  4. HOST, per arriving event: the router finds the ACTIVE context (this
+    #     `with` block) and delivers a TapEvent to its recorder AND to this
+    #     on_step callback — guarded so a raising callback can never touch
+    #     your program.
+    #  5. On block exit: jax.lax.scan is restored. Nothing was ever there.
     tripped = []
 
     def tripwire(e: tap.TapEvent) -> None:
+        # Runs on the HOST (step 4), once per event that crossed the boundary.
         if e.value >= MAX_TREEDEPTH and not tripped:
+            #  e.value = what `select` shipped (the depth, one scalar)
+            #  e.step  = the loop counter jax-tap injected (draw index)
             tripped.append(e.step)
+            #  e.path  = the loop's address ("scan[0]"); e.total = scan length.
+            #  stderr + the "[tap] FAIL" prefix mirror the built-in alerts.
             sys.stderr.write(f"[tap] FAIL {e.path} {e.step}/{e.total}: "
                              f"treedepth=={MAX_TREEDEPTH} (saturated)\n")
 
