@@ -29,7 +29,7 @@ def make_warmup(buggy: bool):
     def step(carry, x):
         s_x, s_s, k = carry
         s = -jnp.linalg.solve(SIGMA, x)  # the model's score
-        # ╔═ jax-tap virtual injection ═══════════════════════════════════╗
+        # ╔═ jax-tap virtual injection ════════════════════════════════════╗
         # ║ print(eig_range(<the carry this body RETURNS>))                ║
         # ╚═ fires at this return, every sampled step; body never edited ══╝
         return (s_x + jnp.outer(x, x), s_s + jnp.outer(s, s), k + 1.0), None
