@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import jaxtap as tap
 import numpy as np
 import pytest
+
+import jaxtap as tap
 
 # ---------------------------------------------------------------------------
 # Helpers

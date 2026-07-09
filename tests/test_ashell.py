@@ -14,9 +14,10 @@ import threading
 
 import jax
 import jax.numpy as jnp
-import jaxtap as tap
 import numpy as np
 import pytest
+
+import jaxtap as tap
 
 # ---------------------------------------------------------------------------
 # Helpers (shared with test_jaxtap.py style)
@@ -144,12 +145,12 @@ def test_ashell_no_double_instrumentation():
     vb_outer = len([e for e in events_verbose if e.path == "scan[0]"])
     vb_inner = len([e for e in events_verbose if e.path == "scan[0]/scan[0]"])
 
-    assert (
-        ctx_outer == vb_outer
-    ), f"outer event count mismatch: with-form={ctx_outer}, verbose={vb_outer}"
-    assert (
-        ctx_inner == vb_inner
-    ), f"inner event count mismatch: with-form={ctx_inner}, verbose={vb_inner}"
+    assert ctx_outer == vb_outer, (
+        f"outer event count mismatch: with-form={ctx_outer}, verbose={vb_outer}"
+    )
+    assert ctx_inner == vb_inner, (
+        f"inner event count mismatch: with-form={ctx_inner}, verbose={vb_inner}"
+    )
     # Concrete values for the report
     assert ctx_outer == N_OUTER, f"outer expected {N_OUTER}, got {ctx_outer}"
     assert ctx_inner == N_OUTER * INNER_N, f"inner expected {N_OUTER * INNER_N}, got {ctx_inner}"
@@ -179,9 +180,9 @@ def test_ashell_while_loop():
     jax.block_until_ready(got)
     assert bitwise_eq(ref, got), "while_loop A-shell not bitwise identical"
     while_events = [e for e in rec.events if e.path == "while[0]"]
-    assert (
-        len(while_events) == expected_iters
-    ), f"expected {expected_iters} while events, got {len(while_events)}"
+    assert len(while_events) == expected_iters, (
+        f"expected {expected_iters} while events, got {len(while_events)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -288,9 +289,9 @@ def test_ashell_foreign_patch_chain():
         jax.block_until_ready(got)
 
         # After context: restored to foreign patch (not original)
-        assert (
-            jax.lax.scan is _foreign_scan
-        ), "lax.scan should be restored to foreign patch, not original"
+        assert jax.lax.scan is _foreign_scan, (
+            "lax.scan should be restored to foreign patch, not original"
+        )
         # Events collected
         assert len(rec.events) > 0, "expected scan events"
         # Result correct
@@ -325,9 +326,9 @@ def test_ashell_foreign_patch_over_us():
             jax.lax.scan = _clobber_scan
         # __exit__ should see that jax.lax.scan is NOT _patched_scan → warn + leave alone
 
-    assert (
-        jax.lax.scan is _clobber_scan
-    ), "exit should NOT have clobbered the foreign patch installed over us"
+    assert jax.lax.scan is _clobber_scan, (
+        "exit should NOT have clobbered the foreign patch installed over us"
+    )
     # Cleanup
     jax.lax.scan = _original_scan
     # Reset warn flag for subsequent tests
@@ -386,13 +387,13 @@ def test_ashell_reentrant_contexts():
     jax.block_until_ready(None)
 
     # Inner context collected the scan that ran while it was active
-    assert len(rec_inner.events) == len(
-        xs_inner
-    ), f"inner expected {len(xs_inner)} events, got {len(rec_inner.events)}"
+    assert len(rec_inner.events) == len(xs_inner), (
+        f"inner expected {len(xs_inner)} events, got {len(rec_inner.events)}"
+    )
     # Outer collected the scans that ran before and after the inner context
-    assert len(rec_outer.events) == 2 * len(
-        xs_outer
-    ), f"outer expected {2 * len(xs_outer)} events, got {len(rec_outer.events)}"
+    assert len(rec_outer.events) == 2 * len(xs_outer), (
+        f"outer expected {2 * len(xs_outer)} events, got {len(rec_outer.events)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -427,13 +428,13 @@ def test_ashell_thread_delegation():
     assert t.is_alive() is False, "worker thread did not finish"
     assert worker_result[0] is not None, "worker did not produce a result"
     assert bitwise_eq(ref, worker_result[0]), "worker result not bitwise identical"
-    assert (
-        len(rec.events) > 0
-    ), "expected events attributed from worker thread to single active context"
+    assert len(rec.events) > 0, (
+        "expected events attributed from worker thread to single active context"
+    )
     scan_events = [e for e in rec.events if e.path == "scan[0]"]
-    assert len(scan_events) == len(
-        xs
-    ), f"expected {len(xs)} scan events from worker, got {len(scan_events)}"
+    assert len(scan_events) == len(xs), (
+        f"expected {len(xs)} scan events from worker, got {len(scan_events)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -468,9 +469,9 @@ def test_ashell_no_phantom_after_exit():
     jax.block_until_ready(r_out)
     n_after = len(rec.events)
 
-    assert (
-        n_after == n_inside
-    ), f"phantom emission: events grew from {n_inside} to {n_after} after context exit"
+    assert n_after == n_inside, (
+        f"phantom emission: events grew from {n_inside} to {n_after} after context exit"
+    )
     assert bitwise_eq(r_in, r_out), "jit call after exit not bitwise identical"
 
 
@@ -509,9 +510,9 @@ def test_ashell_cache_hit_new_context():
         jax.block_until_ready(r_b)
 
     n_b = len(rec_b.events)
-    assert n_b == len(
-        rec_a.events
-    ), f"cache-hit in new context: expected {len(rec_a.events)} events in rec_b, got {n_b}"
+    assert n_b == len(rec_a.events), (
+        f"cache-hit in new context: expected {len(rec_a.events)} events in rec_b, got {n_b}"
+    )
     assert bitwise_eq(ref, r_b), "cache-hit result not bitwise identical"
     # rec_a must not grow (no phantom into dead recorder)
     assert len(rec_a.events) == len(rec_a.events), "rec_a grew after its context exited"
@@ -973,9 +974,9 @@ def test_ashell_record_bform_inside_context_no_double():
         jax.block_until_ready(got)
 
     assert bitwise_eq(ref, got), "record(f) inside context: result wrong"
-    assert (
-        len(rec_inner.events) == N
-    ), f"inner recorder: expected {N} events, got {len(rec_inner.events)}"
-    assert (
-        len(rec_ctx.events) == 0
-    ), f"outer context: expected 0 events from record(f) call, got {len(rec_ctx.events)}"
+    assert len(rec_inner.events) == N, (
+        f"inner recorder: expected {N} events, got {len(rec_inner.events)}"
+    )
+    assert len(rec_ctx.events) == 0, (
+        f"outer context: expected 0 events from record(f) call, got {len(rec_ctx.events)}"
+    )

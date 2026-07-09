@@ -33,3 +33,6 @@ MANIFEST
 # OS
 .DS_Store
 Thumbs.db
+
+# bench scratch logs
+bench/*.log

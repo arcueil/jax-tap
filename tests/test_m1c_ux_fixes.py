@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+
 import jaxtap as tap
 
 # ---------------------------------------------------------------------------
@@ -62,9 +63,9 @@ def test_watch_nan_once_fires_exactly_once(capsys):
     jax.block_until_ready(result)
     captured = capsys.readouterr()
     fail_lines = [line for line in captured.err.splitlines() if "FAIL" in line]
-    assert (
-        len(fail_lines) == 1
-    ), f"expected exactly 1 FAIL line, got {len(fail_lines)}: {fail_lines}"
+    assert len(fail_lines) == 1, (
+        f"expected exactly 1 FAIL line, got {len(fail_lines)}: {fail_lines}"
+    )
 
 
 def test_watch_nan_once_false_fires_multiple(capsys):
@@ -117,9 +118,9 @@ def test_once_rearms_for_new_verbose_call(capsys):
     captured = capsys.readouterr()
     fail_lines = [line for line in captured.err.splitlines() if "FAIL" in line]
     # Two verbose() calls × 1 FAIL each = exactly 2 FAIL lines total
-    assert (
-        len(fail_lines) == 2
-    ), f"expected 2 FAIL lines (one per verbose() call), got {len(fail_lines)}: {fail_lines}"
+    assert len(fail_lines) == 2, (
+        f"expected 2 FAIL lines (one per verbose() call), got {len(fail_lines)}: {fail_lines}"
+    )
 
 
 # ---------------------------------------------------------------------------

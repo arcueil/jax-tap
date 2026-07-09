@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import jaxtap as tap
 import numpy as np
+
+import jaxtap as tap
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -63,9 +64,9 @@ def test_grad_cond_bitwise():
     gref = jax.grad(lambda c: f_cond(jnp.float32(1.0), c))(c0)
     ggot = jax.grad(lambda c: tap.verbose(f_cond, on_step=lambda e: None)(jnp.float32(1.0), c))(c0)
     jax.block_until_ready(ggot)
-    assert _bw(
-        gref, ggot
-    ), f"grad(cond) not bitwise identical: ref={float(gref):.6f} got={float(ggot):.6f}"
+    assert _bw(gref, ggot), (
+        f"grad(cond) not bitwise identical: ref={float(gref):.6f} got={float(ggot):.6f}"
+    )
 
 
 def test_grad_switch_bitwise():
@@ -83,9 +84,9 @@ def test_grad_switch_bitwise():
     gref = jax.grad(lambda c: f_switch(jnp.int32(2), c))(c0)
     ggot = jax.grad(lambda c: tap.verbose(f_switch, on_step=lambda e: None)(jnp.int32(2), c))(c0)
     jax.block_until_ready(ggot)
-    assert _bw(
-        gref, ggot
-    ), f"grad(switch) not bitwise identical: ref={float(gref):.6f} got={float(ggot):.6f}"
+    assert _bw(gref, ggot), (
+        f"grad(switch) not bitwise identical: ref={float(gref):.6f} got={float(ggot):.6f}"
+    )
 
 
 def test_grad_jit_siblings_bitwise():
@@ -104,9 +105,9 @@ def test_grad_jit_siblings_bitwise():
     gref = jax.grad(f_jit_siblings)(c0)
     ggot = jax.grad(tap.verbose(f_jit_siblings, on_step=lambda e: None))(c0)
     jax.block_until_ready(ggot)
-    assert _bw(
-        gref, ggot
-    ), f"grad(jit-siblings) not bitwise identical: ref={float(gref):.6f} got={float(ggot):.6f}"
+    assert _bw(gref, ggot), (
+        f"grad(jit-siblings) not bitwise identical: ref={float(gref):.6f} got={float(ggot):.6f}"
+    )
 
 
 def test_vmap_cond_bitwise():
@@ -145,9 +146,9 @@ def test_grad_cond_in_scan_bitwise():
     gref = jax.grad(f_cond_in_scan)(c0)
     ggot = jax.grad(tap.verbose(f_cond_in_scan, on_step=lambda e: None))(c0)
     jax.block_until_ready(ggot)
-    assert _bw(
-        gref, ggot
-    ), f"grad(cond-in-scan) not bitwise identical: ref={float(gref):.6f} got={float(ggot):.6f}"
+    assert _bw(gref, ggot), (
+        f"grad(cond-in-scan) not bitwise identical: ref={float(gref):.6f} got={float(ggot):.6f}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -209,9 +210,9 @@ def test_grad2_cond_bitwise():
     g2ref = jax.grad(jax.grad(f_cond))(c0)
     g2got = jax.grad(jax.grad(tap.verbose(f_cond, on_step=lambda e: None)))(c0)
     jax.block_until_ready(g2got)
-    assert _bw(
-        g2ref, g2got
-    ), f"grad2(cond) not bitwise identical: ref={float(g2ref):.6f} got={float(g2got):.6f}"
+    assert _bw(g2ref, g2got), (
+        f"grad2(cond) not bitwise identical: ref={float(g2ref):.6f} got={float(g2got):.6f}"
+    )
 
 
 def test_deep_cond_in_jit_in_scan_bitwise():
@@ -256,9 +257,9 @@ def test_deep_nesting_grad_bitwise():
     gref = jax.grad(f_deep)(c0)
     ggot = jax.grad(tap.verbose(f_deep, on_step=lambda e: None))(c0)
     jax.block_until_ready(ggot)
-    assert _bw(
-        gref, ggot
-    ), f"deep nesting grad not bitwise: ref={float(gref):.6f} got={float(ggot):.6f}"
+    assert _bw(gref, ggot), (
+        f"deep nesting grad not bitwise: ref={float(gref):.6f} got={float(ggot):.6f}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -288,16 +289,16 @@ def test_higher_order_autodiff():
     g2_ref = jax.grad(jax.grad(scan_f))(theta)
     g2_got = jax.grad(jax.grad(v))(theta)
     jax.block_until_ready(g2_got)
-    assert _bw(
-        g2_ref, g2_got
-    ), f"grad^2 not bitwise: ref={float(g2_ref):.6f} got={float(g2_got):.6f}"
+    assert _bw(g2_ref, g2_got), (
+        f"grad^2 not bitwise: ref={float(g2_ref):.6f} got={float(g2_got):.6f}"
+    )
 
     g3_ref = jax.grad(jax.grad(jax.grad(scan_f)))(theta)
     g3_got = jax.grad(jax.grad(jax.grad(v)))(theta)
     jax.block_until_ready(g3_got)
-    assert _bw(
-        g3_ref, g3_got
-    ), f"grad^3 not bitwise: ref={float(g3_ref):.6f} got={float(g3_got):.6f}"
+    assert _bw(g3_ref, g3_got), (
+        f"grad^3 not bitwise: ref={float(g3_ref):.6f} got={float(g3_got):.6f}"
+    )
 
 
 def test_hessian_through_verbose():
@@ -419,9 +420,9 @@ def test_vmap_prim_tap_fires_lanes_times_n():
 
     chol_events = [e for e in events if "cholesky" in e.path]
     assert _bw(ref, got), "vmap prim-tap result not bitwise identical"
-    assert (
-        len(chol_events) == LANES * N_CHOL
-    ), f"vmap prim-tap: expected {LANES * N_CHOL} events, got {len(chol_events)}"
+    assert len(chol_events) == LANES * N_CHOL, (
+        f"vmap prim-tap: expected {LANES * N_CHOL} events, got {len(chol_events)}"
+    )
 
 
 def test_cond_prim_tap_taken_branch_only():

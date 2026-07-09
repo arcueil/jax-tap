@@ -31,8 +31,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import jax
 import jax.lax as lax
-import jaxtap as tap
 
+import jaxtap as tap
 from bench._common import (
     DIM,
     L_STEPS,

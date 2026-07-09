@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import jaxtap as tap
 import numpy as np
+
+import jaxtap as tap
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -114,9 +115,9 @@ class TestFix2EmissionOnly:
 
         # Prim taps FIRE inside the scan body even though ops=()
         sin_events = [e for e in events if "sin" in e.path]
-        assert (
-            len(sin_events) == N
-        ), f"expected {N} sin events inside ops=() scan, got {len(sin_events)}"
+        assert len(sin_events) == N, (
+            f"expected {N} sin events inside ops=() scan, got {len(sin_events)}"
+        )
 
     def test_prim_tap_inside_where_filtered_loop_fires(self):
         """
@@ -157,9 +158,9 @@ class TestFix2EmissionOnly:
 
         # cholesky FIRES inside where-filtered scan[0]
         chol_events = [e for e in events if "cholesky" in e.path]
-        assert (
-            len(chol_events) == N
-        ), f"expected {N} cholesky events inside filtered scan[0], got {len(chol_events)}"
+        assert len(chol_events) == N, (
+            f"expected {N} cholesky events inside filtered scan[0], got {len(chol_events)}"
+        )
 
         # scan[1] carry taps fire as normal
         scan1_carry = [e for e in events if "scan[1]" in e.path]
@@ -198,21 +199,21 @@ class TestFix2EmissionOnly:
 
         # Outer scan (depth 0) emits carry taps
         outer_carry = [e for e in events if e.path == "scan[0]"]
-        assert (
-            len(outer_carry) == OUTER
-        ), f"expected {OUTER} outer carry events, got {len(outer_carry)}"
+        assert len(outer_carry) == OUTER, (
+            f"expected {OUTER} outer carry events, got {len(outer_carry)}"
+        )
 
         # Inner scan (depth 1 > max_depth=0) does NOT emit carry taps
         inner_carry = [e for e in events if "scan[0]/scan[0]" in e.path and "sin" not in e.path]
-        assert (
-            len(inner_carry) == 0
-        ), f"inner carry should be suppressed at depth 1, got {len(inner_carry)}"
+        assert len(inner_carry) == 0, (
+            f"inner carry should be suppressed at depth 1, got {len(inner_carry)}"
+        )
 
         # sin prim taps inside the inner scan DO fire (descend-always)
         sin_events = [e for e in events if "sin" in e.path]
-        assert (
-            len(sin_events) == OUTER * INNER
-        ), f"expected {OUTER * INNER} sin events (inside inner scan), got {len(sin_events)}"
+        assert len(sin_events) == OUTER * INNER, (
+            f"expected {OUTER * INNER} sin events (inside inner scan), got {len(sin_events)}"
+        )
 
     def test_demo03_while_in_scan_where_while(self):
         """
@@ -238,15 +239,15 @@ class TestFix2EmissionOnly:
 
         # scan carry taps are silent (where does not match scan[0])
         scan_carry = [e for e in events if e.path == "scan[0]"]
-        assert (
-            len(scan_carry) == 0
-        ), f"scan carry should be silent with 'while' filter, got {len(scan_carry)}"
+        assert len(scan_carry) == 0, (
+            f"scan carry should be silent with 'while' filter, got {len(scan_carry)}"
+        )
 
         # while carry taps fire (path contains 'while')
         while_carry = [e for e in events if "while" in e.path]
-        assert (
-            len(while_carry) > 0
-        ), "while carry taps must fire — this was the demo-03 bug pre-FIX-2"
+        assert len(while_carry) > 0, (
+            "while carry taps must fire — this was the demo-03 bug pre-FIX-2"
+        )
 
     def test_addressing_stable_under_ops_filter(self):
         """
@@ -289,9 +290,9 @@ class TestFix2EmissionOnly:
         assert "scan[1]" in paths, f"scan[1] missing; got {sorted(paths)}"
 
         # while carry taps absent
-        assert not any(
-            "while" in p and "sin" not in p for p in paths
-        ), f"while carry taps should not fire, paths: {sorted(paths)}"
+        assert not any("while" in p and "sin" not in p for p in paths), (
+            f"while carry taps should not fire, paths: {sorted(paths)}"
+        )
 
         # sin fires inside scan body (scan IS descended)
         sin_events = [e for e in events if "sin" in e.path]
@@ -336,9 +337,9 @@ class TestFix1SampleEveryGatesPrimTaps:
             jax.block_until_ready(got)
 
             sin_events = [e for e in events if "sin" in e.path]
-            assert (
-                len(sin_events) == expected
-            ), f"se={se}: expected {expected} sin events, got {len(sin_events)}"
+            assert len(sin_events) == expected, (
+                f"se={se}: expected {expected} sin events, got {len(sin_events)}"
+            )
 
     def test_prim_tap_outside_loop_always_fires(self):
         """
@@ -364,9 +365,9 @@ class TestFix1SampleEveryGatesPrimTaps:
             jax.block_until_ready(got)
 
             chol_events = [e for e in events if "cholesky" in e.path]
-            assert (
-                len(chol_events) == 1
-            ), f"se={se}: outside-loop prim tap should always fire (got {len(chol_events)})"
+            assert len(chol_events) == 1, (
+                f"se={se}: outside-loop prim tap should always fire (got {len(chol_events)})"
+            )
             assert chol_events[0].step == -1, "outside-loop step must be -1"
             assert bitwise_eq(ref, got), f"se={se}: outside-loop result not bitwise identical"
 
@@ -434,9 +435,9 @@ class TestFix1SampleEveryGatesPrimTaps:
 
         fail_lines = [ln for ln in buf.getvalue().splitlines() if "FAIL" in ln]
         # once=True: exactly ONE alert line across all surviving events
-        assert (
-            len(fail_lines) == 1
-        ), f"once=True with se=10 should produce 1 FAIL line, got {len(fail_lines)}: {fail_lines}"
+        assert len(fail_lines) == 1, (
+            f"once=True with se=10 should produce 1 FAIL line, got {len(fail_lines)}: {fail_lines}"
+        )
 
         # on_step receives 3 events (steps 0, 10, 20)
         sin_events = [e for e in events if "sin" in e.path]
@@ -469,9 +470,9 @@ class TestFix1SampleEveryGatesPrimTaps:
         carry_events = [e for e in events if e.path == "scan[0]"]
         sin_events = [e for e in events if "sin" in e.path]
 
-        assert (
-            len(carry_events) == N // se
-        ), f"expected {N // se} carry events, got {len(carry_events)}"
+        assert len(carry_events) == N // se, (
+            f"expected {N // se} carry events, got {len(carry_events)}"
+        )
         assert len(sin_events) == N // se, f"expected {N // se} sin events, got {len(sin_events)}"
 
     def test_prim_tap_se_gating_fired_steps_are_correct(self):
@@ -500,9 +501,9 @@ class TestFix1SampleEveryGatesPrimTaps:
         sin_events = [e for e in events if "sin" in e.path]
         fired_steps = sorted(e.step for e in sin_events)
         expected_steps = list(range(0, N, se))
-        assert (
-            fired_steps == expected_steps
-        ), f"se={se}: expected steps {expected_steps}, got {fired_steps}"
+        assert fired_steps == expected_steps, (
+            f"se={se}: expected steps {expected_steps}, got {fired_steps}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -575,9 +576,9 @@ class TestFix3PathAwareSelect:
 
         # select received the correct path at trace time (at least once)
         assert len(received_paths) >= 1, "select must be called at least once (trace time)"
-        assert (
-            "scan[0]" in received_paths
-        ), f"expected 'scan[0]' in received paths, got {received_paths}"
+        assert "scan[0]" in received_paths, (
+            f"expected 'scan[0]' in received paths, got {received_paths}"
+        )
 
     def test_select_with_path_positional_2nd_arg(self):
         """
@@ -609,9 +610,9 @@ class TestFix3PathAwareSelect:
         assert len(scan_events) == N
         # select is called at JAX trace time (once per body trace, not per step)
         assert len(received_paths) >= 1, "select must be called at least once (trace time)"
-        assert (
-            "scan[0]" in received_paths
-        ), f"expected 'scan[0]' in received paths, got {received_paths}"
+        assert "scan[0]" in received_paths, (
+            f"expected 'scan[0]' in received paths, got {received_paths}"
+        )
 
     def test_select_path_receives_correct_path_per_node(self):
         """
@@ -660,9 +661,9 @@ class TestFix3PathAwareSelect:
         # Verify the correct paths were seen at trace time.
         seen_paths = {p for (_, p) in path_by_event}
         assert "scan[0]" in seen_paths, f"expected 'scan[0]' in trace-time paths, got {seen_paths}"
-        assert (
-            "scan[0]/scan[0]" in seen_paths
-        ), f"expected 'scan[0]/scan[0]' in trace-time paths, got {seen_paths}"
+        assert "scan[0]/scan[0]" in seen_paths, (
+            f"expected 'scan[0]/scan[0]' in trace-time paths, got {seen_paths}"
+        )
 
     def test_per_tap_select_with_path(self):
         """
@@ -698,9 +699,9 @@ class TestFix3PathAwareSelect:
         # select is called at JAX trace time (once per body trace).
         # At least one call must have happened with a path containing "sin".
         assert len(received_prim_paths) >= 1, "per-tap select must be called at trace time"
-        assert any(
-            "sin" in p for p in received_prim_paths
-        ), f"expected 'sin' in some prim path, got {received_prim_paths}"
+        assert any("sin" in p for p in received_prim_paths), (
+            f"expected 'sin' in some prim path, got {received_prim_paths}"
+        )
 
     def test_per_tap_select_without_path_back_compat(self):
         """
@@ -726,6 +727,6 @@ class TestFix3PathAwareSelect:
         sin_events = [e for e in events if "sin" in e.path]
         assert len(sin_events) == N
         for e in sin_events:
-            assert np.asarray(e.value).ndim == 0 or hasattr(
-                e.value, "shape"
-            ), "select(v) result should be array-like"
+            assert np.asarray(e.value).ndim == 0 or hasattr(e.value, "shape"), (
+                "select(v) result should be array-like"
+            )

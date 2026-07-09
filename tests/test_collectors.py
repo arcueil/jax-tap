@@ -13,9 +13,10 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
-import jaxtap as tap
 import numpy as np
 import pytest
+
+import jaxtap as tap
 
 # ---------------------------------------------------------------------------
 # Helpers (mirror of test_jaxtap.py helpers)
@@ -489,9 +490,9 @@ def test_select_reduce_preserved():
     _, events = _collect(_simple_scan, jnp.float32(1.0), xs, select=lambda c: c[0])
     for e in events:
         # value should be the scalar (0-dim) result of c[0], not the full carry
-        assert (
-            np.asarray(e.value).ndim == 0
-        ), f"expected scalar select output, got shape {np.asarray(e.value).shape}"
+        assert np.asarray(e.value).ndim == 0, (
+            f"expected scalar select output, got shape {np.asarray(e.value).shape}"
+        )
 
 
 def test_select_dict_structure():

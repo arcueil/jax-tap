@@ -21,6 +21,7 @@ import time
 import jax
 import jax.lax as lax
 import jax.numpy as jnp
+
 import jaxtap as tap
 
 # ---------------------------------------------------------------------------

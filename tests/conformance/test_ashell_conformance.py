@@ -17,8 +17,9 @@ import warnings
 
 import jax
 import jax.numpy as jnp
-import jaxtap as tap
 import numpy as np
+
+import jaxtap as tap
 from jaxtap._ashell import (
     _context_registry,
     _original_scan,
@@ -173,9 +174,9 @@ def test_ashell_error_transparency():
 
     assert outside_exc is not None, "expected bad_scan to raise outside context"
     assert inside_exc is not None, "expected bad_scan to raise inside A-shell context"
-    assert (
-        outside_exc == inside_exc
-    ), f"error transparency: outside={outside_exc.__name__!r} inside={inside_exc.__name__!r}"
+    assert outside_exc == inside_exc, (
+        f"error transparency: outside={outside_exc.__name__!r} inside={inside_exc.__name__!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -224,9 +225,9 @@ def test_ashell_equivalence_nested_scan():
 
     vb, ash, bw = _events_equivalent(nested, jnp.float32(0.5))
     assert bw, "nested scan: verbose vs ashell result not bitwise identical"
-    assert (
-        vb == ash
-    ), f"nested scan: event mismatch verbose={sum(vb.values())} ash={sum(ash.values())}"
+    assert vb == ash, (
+        f"nested scan: event mismatch verbose={sum(vb.values())} ash={sum(ash.values())}"
+    )
 
 
 def test_ashell_equivalence_cond_in_scan():
@@ -244,9 +245,9 @@ def test_ashell_equivalence_cond_in_scan():
 
     vb, ash, bw = _events_equivalent(cond_in_scan, jnp.float32(0.5))
     assert bw, "cond-in-scan: verbose vs ashell result not bitwise identical"
-    assert (
-        vb == ash
-    ), f"cond-in-scan: event mismatch verbose={sum(vb.values())} ash={sum(ash.values())}"
+    assert vb == ash, (
+        f"cond-in-scan: event mismatch verbose={sum(vb.values())} ash={sum(ash.values())}"
+    )
 
 
 def test_ashell_equivalence_primitive_taps():
@@ -304,9 +305,9 @@ def test_ashell_nonlifo_exit_order():
         first.__exit__(None, None, None)
 
         # After first exit: one context still active; scan must still be patched
-        assert (
-            jax.lax.scan is _patched_scan
-        ), f"order({exit_first}-first): scan not still patched after first exit"
+        assert jax.lax.scan is _patched_scan, (
+            f"order({exit_first}-first): scan not still patched after first exit"
+        )
         assert len(_context_registry) == 1
 
         # Scan must still work correctly between exits
@@ -317,15 +318,15 @@ def test_ashell_nonlifo_exit_order():
         second.__exit__(None, None, None)
 
         # After last exit: both restored
-        assert (
-            jax.lax.scan is _original_scan
-        ), f"order({exit_first}-first): scan not restored after last exit"
-        assert (
-            jax.lax.while_loop is _original_while
-        ), f"order({exit_first}-first): while_loop not restored after last exit"
-        assert (
-            len(_context_registry) == 0
-        ), f"order({exit_first}-first): registry not empty after last exit"
+        assert jax.lax.scan is _original_scan, (
+            f"order({exit_first}-first): scan not restored after last exit"
+        )
+        assert jax.lax.while_loop is _original_while, (
+            f"order({exit_first}-first): while_loop not restored after last exit"
+        )
+        assert len(_context_registry) == 0, (
+            f"order({exit_first}-first): registry not empty after last exit"
+        )
 
     try:
         _run_order("a")
@@ -390,12 +391,12 @@ def test_ashell_two_owned_contexts_bystander():
 
     try:
         assert not errors, f"thread errors: {errors}"
-        assert len(recs.get("A", [])) == len(
-            xs_a
-        ), f"thread A: expected {len(xs_a)} events, got {len(recs.get('A', []))}"
-        assert len(recs.get("B", [])) == len(
-            xs_b
-        ), f"thread B: expected {len(xs_b)} events, got {len(recs.get('B', []))}"
+        assert len(recs.get("A", [])) == len(xs_a), (
+            f"thread A: expected {len(xs_a)} events, got {len(recs.get('A', []))}"
+        )
+        assert len(recs.get("B", [])) == len(xs_b), (
+            f"thread B: expected {len(xs_b)} events, got {len(recs.get('B', []))}"
+        )
         assert bys_result.get("ok", False), "bystander scan not bitwise-correct"
         assert len(_context_registry) == 0, "registry not empty after all threads exit"
         assert jax.lax.scan is _original_scan, "scan not restored after all threads exit"
@@ -461,9 +462,9 @@ def test_ashell_registry_race_bounded():
     try:
         assert not errors, f"race stress: thread errors: {errors[:5]}"
         assert bad_results[0] == 0, f"race stress: {bad_results[0]} non-bitwise results"
-        assert (
-            len(_context_registry) == 0
-        ), f"race stress: registry leaked ({len(_context_registry)} entries)"
+        assert len(_context_registry) == 0, (
+            f"race stress: registry leaked ({len(_context_registry)} entries)"
+        )
         assert jax.lax.scan is _original_scan, "race stress: scan not restored to original"
         assert jax.lax.while_loop is _original_while, "race stress: while_loop not restored"
     finally:
