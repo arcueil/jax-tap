@@ -281,7 +281,7 @@ From a single first call, measure *true* compile cost (trace + compile) separate
 
 ## demo/ — Learn by example
 
-**demo/ is the primary documentation.** It holds nine runnable files demonstrating real bugs from our own history (silent float32 Cholesky NaNs, adaptation metrics that never moved, inner loops that quit early, ...) — each shows the silent symptom, then jax-tap localizing it. A suggested reading order and context are in `demo/README.md`.
+**demo/ is the primary documentation.** It holds ten runnable files demonstrating real bugs from our own history (silent float32 Cholesky NaNs, adaptation metrics that never moved, inner loops that quit early, ...) — each shows the silent symptom, then jax-tap localizing it. A suggested reading order and context are in `demo/README.md`.
 
 The flagship: `demo/blackjax_warmup_telemetry.py` instruments a real BlackJAX warmup unmodified, streaming its step size and mass matrix as the algorithm adapts — no changes to BlackJAX, zero logging code in the warmup itself.
 
@@ -299,7 +299,7 @@ Pre-release; not yet on PyPI. The core library has passed 2-arm adversarial revi
 | Demos | 10 runnable bug reproductions | ✅ completed |
 | Benchmarks | overhead profiling + recommendation ladder | ✅ completed |
 | Docs | README + docstrings + demo reading order | ✅ completed |
-| Conformance suite | edge-case coverage (deferred milestone) | 🔄 in progress |
+| Conformance suite | 176-entry coverage map; 34 conformance tests (169 total) | ✅ done |
 | Release gate | GPU validation on release branch | pending |
 | PyPI | package distribution | pending |
 
