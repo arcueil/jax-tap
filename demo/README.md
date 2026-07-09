@@ -26,6 +26,7 @@ For a newcomer, start with this sequence:
 6. **`mass_matrix_ndim_mismatch.py`** — reading trace-time fingerprints with `tap.primitives()`
 7. **`async_dispatch_compile_blowup.py`** — using event timestamps to locate a boundary
 8. **`backward_pass_vjp_nan.py`** — tapping the differentiated function to see the backward pass
+9. **`vmap_chains_progress.py`** — the vmap duality: one bar for 8 chains, or per-chain telemetry
 
 Each builds on the previous one's concepts, and together they show every major tap class and the patterns they address.
 
@@ -153,6 +154,15 @@ function whose jaxpr contains the backward pass as ordinary primitives — tap
 THE DIFFERENTIATED FUNCTION and `watch_nan("div")` fires at the 0/0's birth
 site with an address: `[tap] FAIL scan[0]/div[0] 0/3: NaN/Inf`.
 **Tap class:** documented boundary + the tap-grad(f)-itself workaround.
+
+### ✅ `vmap_chains_progress.py` — eight chains, one progress bar
+**What it shows:** under `jax.vmap`, whether a tap fires once or per-lane
+depends on whether the shipped value is batched. `select=lambda _: ()` ships
+only the (unbatched) step counter → ONE progress bar for 8 chains (10
+events); `select` on the carry ships batched values → per-chain telemetry
+(80 = 8×10). Same unmodified sampler; `select` picks the face.
+**Tap class:** carry tap under `vmap` (the documented per-lane duality, used
+as a feature).
 
 ## Why this directory exists
 
