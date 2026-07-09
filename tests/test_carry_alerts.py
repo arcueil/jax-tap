@@ -537,3 +537,151 @@ def test_carry_alert_a_form_alert_once_per_context(capsys):
         f"ctx2: expected 1 FAIL line, got {ctx2_lines} "
         "(once-budget was not reset for the new context — stale closure set)"
     )
+
+
+# ---------------------------------------------------------------------------
+# 15. vmap duality — B-form: jax.vmap(verbose(f, alert=...))
+# ---------------------------------------------------------------------------
+
+
+def test_carry_alert_vmap_b_form(capsys):
+    """vmap(verbose(f, alert=...)): fires per-lane without crashing; format sane.
+
+    Under jax.vmap, debug.callback is vectorised: each lane fires the callback
+    independently.  Total alerts == LANES * N; every FAIL line is well-formed.
+    """
+    N = 4
+    LANES = 3
+    x0_batch = jnp.zeros(LANES)
+
+    def f(x0):
+        def body(carry, _):
+            return carry + 1.0, carry
+
+        return jax.lax.scan(body, x0, None, length=N)
+
+    fired: list[int] = []
+
+    def alert_fn(event: tap.TapEvent) -> bool:
+        fired.append(event.step)
+        return True
+
+    result = jax.vmap(tap.verbose(f, alert=alert_fn))(x0_batch)
+    jax.block_until_ready(result)
+
+    assert len(fired) == LANES * N, (
+        f"expected {LANES * N} alerts (LANES={LANES}, N={N}), got {len(fired)}"
+    )
+
+    captured = capsys.readouterr()
+    fail_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")]
+    assert len(fail_lines) == LANES * N, (
+        f"expected {LANES * N} FAIL lines, got {len(fail_lines)}"
+    )
+    for ln in fail_lines:
+        parts = ln.split()
+        assert parts[0] == "[tap]" and parts[1] == "FAIL", f"bad format: {ln!r}"
+        assert "/" in parts[3], f"step/total missing in {parts[3]!r}: {ln!r}"
+
+
+# ---------------------------------------------------------------------------
+# 16. vmap duality — A-form: with tap.record(alert=...): jax.vmap(f)(batch)
+# ---------------------------------------------------------------------------
+
+
+def test_carry_alert_vmap_a_form(capsys):
+    """A-form vmap: ``with tap.record(alert=...): jax.vmap(f)(batch)`` fires per-lane.
+
+    The _dynamic_router is called per-lane (LANES * N times); the recorder
+    collects the same count; all FAIL lines are well-formed.
+    """
+    N = 4
+    LANES = 3
+    x0_batch = jnp.zeros(LANES)
+
+    def f(x0):
+        def body(carry, _):
+            return carry + 1.0, carry
+
+        return jax.lax.scan(body, x0, None, length=N)
+
+    fired: list[int] = []
+
+    with tap.record(alert=lambda e: fired.append(e.step) or True) as rec:
+        result = jax.vmap(f)(x0_batch)
+    jax.block_until_ready(result)
+
+    assert len(fired) == LANES * N, (
+        f"expected {LANES * N} alerts (LANES={LANES}, N={N}), got {len(fired)}"
+    )
+
+    scan_events = [e for e in rec.events if e.path == "scan[0]"]
+    assert len(scan_events) == LANES * N, (
+        f"recorder expected {LANES * N} events, got {len(scan_events)}"
+    )
+
+    captured = capsys.readouterr()
+    fail_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")]
+    assert len(fail_lines) == LANES * N, (
+        f"expected {LANES * N} FAIL lines, got {len(fail_lines)}"
+    )
+    for ln in fail_lines:
+        parts = ln.split()
+        assert parts[0] == "[tap]" and parts[1] == "FAIL", f"bad format: {ln!r}"
+        assert "/" in parts[3], f"step/total missing in {parts[3]!r}: {ln!r}"
+
+
+# ---------------------------------------------------------------------------
+# 17. Degenerate combo: select= without any observer (select is dead code)
+# ---------------------------------------------------------------------------
+
+
+def test_carry_alert_degenerate_select_dead_code():
+    """verbose(f, select=sel, on_step=None, alert=None) traces no debug.callback.
+
+    With both observers absent, the early-exit branch fires a Python no-op
+    tap_cb — select is never evaluated on-device and adds no XLA instructions.
+
+    Verified two ways:
+    1. No ``debug_callback`` primitive in the jaxpr text.
+    2. Jaxpr text is identical to verbose(f, on_step=None, alert=None) — the
+       select= argument is truly dead code, not silently computing something.
+
+    Contrast: verbose(f, on_step=cb) DOES add debug_callback equations.
+    """
+    N = 5
+    x0 = jnp.float32(0.0)
+
+    def f(x0_):
+        def body(carry, _):
+            return carry + 1.0, carry
+
+        return jax.lax.scan(body, x0_, None, length=N)
+
+    sel = lambda carry: carry[0] if isinstance(carry, tuple) else carry  # noqa: E731
+
+    # Degenerate: select present, no observers — select is dead code.
+    sel_dead_jaxpr = str(
+        jax.make_jaxpr(tap.verbose(f, select=sel, on_step=None, alert=None))(x0)
+    )
+    # Baseline: no select, no observers.
+    no_obs_jaxpr = str(jax.make_jaxpr(tap.verbose(f, on_step=None, alert=None))(x0))
+    # Active tap: on_step present — debug.callback IS traced.
+    with_cb_jaxpr = str(jax.make_jaxpr(tap.verbose(f, on_step=lambda e: None))(x0))
+
+    # 1. No debug_callback in degenerate case.
+    assert "debug_callback" not in sel_dead_jaxpr, (
+        "select= without any observer must not trace a debug_callback; "
+        f"found one in jaxpr:\n{sel_dead_jaxpr}"
+    )
+
+    # 2. Jaxpr text is identical to the no-observer baseline — select is truly dead.
+    assert sel_dead_jaxpr == no_obs_jaxpr, (
+        "verbose(f, select=sel, on_step=None, alert=None) jaxpr must be identical "
+        "to verbose(f, on_step=None, alert=None); select without any consumer is dead code"
+    )
+
+    # Contrast: with on_step, debug_callback IS present.
+    assert "debug_callback" in with_cb_jaxpr, (
+        "verbose(f, on_step=cb) must trace a debug_callback; something is wrong with the baseline"
+    )
