@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -83,7 +83,9 @@ def test_ashell_int32_carry_bitwise():
         got = jax.lax.scan(lambda c, x: (c + x, c), jnp.int32(0), xs_i)
     jax.block_until_ready(got)
     assert _bw(ref, got), "int32 carry: A-shell result not bitwise identical"
-    assert len(rec.events) == 5, f"int32 carry: expected 5 events, got {len(rec.events)}"
+    assert len(rec.events) == 5, (
+        f"int32 carry: expected 5 events, got {len(rec.events)}"
+    )
 
 
 def test_ashell_complex64_carry_bitwise():
@@ -97,7 +99,9 @@ def test_ashell_complex64_carry_bitwise():
         got = jax.lax.scan(lambda c, x: (c + x, c), jnp.complex64(1 + 1j), xs_c)
     jax.block_until_ready(got)
     assert _bw(ref, got), "complex64 carry: A-shell result not bitwise identical"
-    assert len(rec.events) == 5, f"complex64 carry: expected 5 events, got {len(rec.events)}"
+    assert len(rec.events) == 5, (
+        f"complex64 carry: expected 5 events, got {len(rec.events)}"
+    )
 
 
 def test_ashell_dict_carry_bitwise():
@@ -126,10 +130,14 @@ def test_ashell_pytree_xs_dict():
     xs_dict = {"u": XS5, "v": XS5 * 2}
     ref = jax.lax.scan(lambda c, x: (c + x["u"] + x["v"], c), jnp.float32(0.0), xs_dict)
     with tap.record() as rec:
-        got = jax.lax.scan(lambda c, x: (c + x["u"] + x["v"], c), jnp.float32(0.0), xs_dict)
+        got = jax.lax.scan(
+            lambda c, x: (c + x["u"] + x["v"], c), jnp.float32(0.0), xs_dict
+        )
     jax.block_until_ready(got)
     assert _bw(ref, got), "pytree xs dict: A-shell result not bitwise identical"
-    assert len(rec.events) == 5, f"pytree xs dict: expected 5 events, got {len(rec.events)}"
+    assert len(rec.events) == 5, (
+        f"pytree xs dict: expected 5 events, got {len(rec.events)}"
+    )
 
 
 def test_ashell_prng_key_carry():
@@ -147,7 +155,9 @@ def test_ashell_prng_key_carry():
         got = jax.lax.scan(body, jax.random.PRNGKey(0), None, length=5)
     jax.block_until_ready(got)
     assert _bw(ref, got), "PRNG-key carry: A-shell result not bitwise identical"
-    assert len(rec.events) == 5, f"PRNG-key carry: expected 5 events, got {len(rec.events)}"
+    assert len(rec.events) == 5, (
+        f"PRNG-key carry: expected 5 events, got {len(rec.events)}"
+    )
 
 
 def test_ashell_all_keyword_form():
@@ -161,7 +171,9 @@ def test_ashell_all_keyword_form():
         got = jax.lax.scan(f=body, init=jnp.float32(0.0), xs=XS5)
     jax.block_until_ready(got)
     assert _bw(ref, got), "all-keyword form: A-shell result not bitwise identical"
-    assert len(rec.events) == 5, f"all-keyword form: expected 5 events, got {len(rec.events)}"
+    assert len(rec.events) == 5, (
+        f"all-keyword form: expected 5 events, got {len(rec.events)}"
+    )
 
 
 def test_ashell_error_transparency():
@@ -281,7 +293,9 @@ def test_ashell_equivalence_primitive_taps():
 
     vb, ash, bw = _events_equivalent(chol, jnp.float32(1.0), taps=[tap.on("cholesky")])
     assert bw, "prim-tap: verbose vs ashell result not bitwise identical"
-    assert vb == ash, f"prim-tap: event mismatch verbose={sum(vb.values())} ash={sum(ash.values())}"
+    assert vb == ash, (
+        f"prim-tap: event mismatch verbose={sum(vb.values())} ash={sum(ash.values())}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +326,9 @@ def test_ashell_nonlifo_exit_order():
         a.__enter__()
         b.__enter__()
 
-        assert jax.lax.scan is _patched_scan, f"{exit_first}: scan not patched after both enter"
+        assert jax.lax.scan is _patched_scan, (
+            f"{exit_first}: scan not patched after both enter"
+        )
         assert len(_context_registry) == 2
 
         first, second = (a, b) if exit_first == "a" else (b, a)
@@ -327,7 +343,9 @@ def test_ashell_nonlifo_exit_order():
         # Scan must still work correctly between exits
         r_mid = jax.lax.scan(lambda c, x: (c + x, c), jnp.float32(0.0), xs)
         jax.block_until_ready(r_mid)
-        assert _bw(ref, r_mid), f"order({exit_first}-first): scan between exits not bitwise correct"
+        assert _bw(ref, r_mid), (
+            f"order({exit_first}-first): scan between exits not bitwise correct"
+        )
 
         second.__exit__(None, None, None)
 
@@ -413,7 +431,9 @@ def test_ashell_two_owned_contexts_bystander():
         )
         assert bys_result.get("ok", False), "bystander scan not bitwise-correct"
         assert len(_context_registry) == 0, "registry not empty after all threads exit"
-        assert jax.lax.scan is _original_scan, "scan not restored after all threads exit"
+        assert jax.lax.scan is _original_scan, (
+            "scan not restored after all threads exit"
+        )
     finally:
         _clean()
 
@@ -479,8 +499,12 @@ def test_ashell_registry_race_bounded():
         assert len(_context_registry) == 0, (
             f"race stress: registry leaked ({len(_context_registry)} entries)"
         )
-        assert jax.lax.scan is _original_scan, "race stress: scan not restored to original"
-        assert jax.lax.while_loop is _original_while, "race stress: while_loop not restored"
+        assert jax.lax.scan is _original_scan, (
+            "race stress: scan not restored to original"
+        )
+        assert jax.lax.while_loop is _original_while, (
+            "race stress: while_loop not restored"
+        )
     finally:
         _clean()
 

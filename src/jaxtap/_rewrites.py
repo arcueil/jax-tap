@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -41,7 +41,8 @@ Python-time (trace-time) decision; no device-side overhead is added when
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
@@ -189,7 +190,15 @@ def rewrite_while(
         # True as the 9th (_in_loop override) so _interp gates primitive taps
         # with sample_every when inside this while body.
         new_carry = interp_fn(
-            bj.jaxpr, bj.consts, [*bconsts, *carry], tap_cb, ops, here + "/", step, None, True
+            bj.jaxpr,
+            bj.consts,
+            [*bconsts, *carry],
+            tap_cb,
+            ops,
+            here + "/",
+            step,
+            None,
+            True,
         )
         # M1d FIX 2: emit_carry=False suppresses this node's carry heartbeat
         # while still having descended into the body above.

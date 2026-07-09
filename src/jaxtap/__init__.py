@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -60,7 +60,8 @@ import dataclasses
 import inspect
 import sys
 import warnings
-from typing import TYPE_CHECKING, Any, Callable, Sequence
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
@@ -99,7 +100,9 @@ class TapEvent:
     path: str  # stable address, e.g. "scan[0]/while[0]"
     step: int  # iteration index (0-based); -1 for primitive taps outside any loop
     value: Any  # selected carry payload delivered to the host
-    total: "int | None" = None  # enclosing loop length when known (scan: N; while/outside: None)
+    total: "int | None" = (
+        None  # enclosing loop length when known (scan: N; while/outside: None)
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -240,7 +243,12 @@ def on(
     PrimitiveTap
     """
     return PrimitiveTap(
-        prim_name=prim_name, select=select, alert=alert, label=label, output=output, once=once
+        prim_name=prim_name,
+        select=select,
+        alert=alert,
+        label=label,
+        output=output,
+        once=once,
     )
 
 
@@ -337,7 +345,9 @@ def _format_value(value: Any) -> str:
             return "<unprintable>"
 
 
-def _fire_alert(spec: PrimitiveTap, event: TapEvent, _once_fired: "set[int] | None" = None) -> None:
+def _fire_alert(
+    spec: PrimitiveTap, event: TapEvent, _once_fired: "set[int] | None" = None
+) -> None:
     """Fire ``spec.alert(event.value)`` and write the terse line to stderr if truthy.
 
     Runs inside the ``_guard`` discipline: a raising alert predicate is caught,
@@ -380,11 +390,15 @@ def _fire_alert(spec: PrimitiveTap, event: TapEvent, _once_fired: "set[int] | No
             if spec._printer:
                 # tap.print format: [tap] {path} {step}/{total}: {value_repr}
                 value_repr = _format_value(event.value)
-                sys.stderr.write(f"[tap] {event.path} {event.step}/{total_str}: {value_repr}\n")
+                sys.stderr.write(
+                    f"[tap] {event.path} {event.step}/{total_str}: {value_repr}\n"
+                )
             else:
                 # alert format: [tap] FAIL {path} {step}/{total}: {label}
                 label = spec.label if spec.label is not None else spec.prim_name
-                sys.stderr.write(f"[tap] FAIL {event.path} {event.step}/{total_str}: {label}\n")
+                sys.stderr.write(
+                    f"[tap] FAIL {event.path} {event.step}/{total_str}: {label}\n"
+                )
         except Exception:  # noqa: BLE001
             pass
 
@@ -490,7 +504,9 @@ def verbose(
     if sample_every < 1:
         raise ValueError(f"sample_every must be >= 1, got {sample_every}")
 
-    internal_ops: frozenset[str] = frozenset(_OP_NAME_MAP[op] for op in ops if op in _OP_NAME_MAP)
+    internal_ops: frozenset[str] = frozenset(
+        _OP_NAME_MAP[op] for op in ops if op in _OP_NAME_MAP
+    )
 
     if select is not None:
         # FIX 3: inspect select once at verbose() call time.
@@ -507,7 +523,9 @@ def verbose(
         ) -> None:
             # _select_wants_path is a Python bool: this branch resolves at trace time.
             selected = (
-                select(carry_leaves, path=path) if _select_wants_path else select(carry_leaves)
+                select(carry_leaves, path=path)
+                if _select_wants_path
+                else select(carry_leaves)
             )
             flat_selected = jax.tree_util.tree_leaves(selected)
             # Capture pytree structure at Python (trace) time for host-side recon.
@@ -515,7 +533,10 @@ def verbose(
 
             def _host(step_: Any, *flat_vals: Any) -> None:
                 value = jax.tree_util.tree_unflatten(sel_tree, list(flat_vals))
-                _guard(on_step, TapEvent(path=path, step=int(step_), value=value, total=total))
+                _guard(
+                    on_step,
+                    TapEvent(path=path, step=int(step_), value=value, total=total),
+                )
 
             jax.debug.callback(_host, step, *flat_selected, ordered=False)
 
@@ -527,7 +548,10 @@ def verbose(
             path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
         ) -> None:
             def _host(step_: Any, *leaves: Any) -> None:
-                _guard(on_step, TapEvent(path=path, step=int(step_), value=leaves, total=total))
+                _guard(
+                    on_step,
+                    TapEvent(path=path, step=int(step_), value=leaves, total=total),
+                )
 
             jax.debug.callback(_host, step, *carry_leaves, ordered=False)
 
@@ -539,7 +563,9 @@ def verbose(
     if sample_every > 1:
         _uncapped = _base_tap_cb
 
-        def tap_cb(path: str, step: Any, *carry_leaves: Any, total: "int | None" = None) -> None:
+        def tap_cb(
+            path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
+        ) -> None:
             jax.lax.cond(
                 step % sample_every == 0,
                 lambda _: _uncapped(path, step, *carry_leaves, total=total),
@@ -596,7 +622,9 @@ def verbose(
                 # FIX 3: pass path= if the per-tap select accepts it.
                 _pspec_wants_path = _spec_path_flags.get(id(spec), False)
                 selected = (
-                    spec.select(eff_outs, path=path) if _pspec_wants_path else spec.select(eff_outs)
+                    spec.select(eff_outs, path=path)
+                    if _pspec_wants_path
+                    else spec.select(eff_outs)
                 )
             else:
                 selected = eff_outs
@@ -618,7 +646,9 @@ def verbose(
             if sample_every > 1 and _in_loop:
                 jax.lax.cond(
                     step % sample_every == 0,
-                    lambda _: jax.debug.callback(_host, step, *flat_selected, ordered=False),
+                    lambda _: jax.debug.callback(
+                        _host, step, *flat_selected, ordered=False
+                    ),
                     lambda _: None,
                     step,
                 )
@@ -840,7 +870,12 @@ def watch_nan(
         select_fn = _select_finite_tuple
 
     return on(
-        prim_name, select=select_fn, alert=lambda ok: not ok, label=label, output=output, once=once
+        prim_name,
+        select=select_fn,
+        alert=lambda ok: not ok,
+        label=label,
+        output=output,
+        once=once,
     )
 
 

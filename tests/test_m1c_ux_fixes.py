@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -94,7 +94,9 @@ def test_watch_nan_once_false_fires_multiple(capsys):
     captured = capsys.readouterr()
     fail_lines = [line for line in captured.err.splitlines() if "FAIL" in line]
     # Multiple steps have NaN cholesky; once=False should yield >1 FAIL lines
-    assert len(fail_lines) > 1, f"expected >1 FAIL lines with once=False, got {len(fail_lines)}"
+    assert len(fail_lines) > 1, (
+        f"expected >1 FAIL lines with once=False, got {len(fail_lines)}"
+    )
 
 
 def test_tap_print_once_fires_exactly_once(capsys):

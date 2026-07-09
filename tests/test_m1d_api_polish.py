@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -125,7 +125,9 @@ class TestFix2EmissionOnly:
 
         # No carry tap events (ops=() suppresses them)
         carry_events = [e for e in events if "sin" not in e.path]
-        assert len(carry_events) == 0, f"expected 0 carry events, got {len(carry_events)}"
+        assert len(carry_events) == 0, (
+            f"expected 0 carry events, got {len(carry_events)}"
+        )
 
         # Prim taps FIRE inside the scan body even though ops=()
         sin_events = [e for e in events if "sin" in e.path]
@@ -168,7 +170,9 @@ class TestFix2EmissionOnly:
 
         # scan[0] carry taps suppressed
         scan0_carry = [e for e in events if e.path == "scan[0]"]
-        assert len(scan0_carry) == 0, f"scan[0] carry should be silent, got {len(scan0_carry)}"
+        assert len(scan0_carry) == 0, (
+            f"scan[0] carry should be silent, got {len(scan0_carry)}"
+        )
 
         # cholesky FIRES inside where-filtered scan[0]
         chol_events = [e for e in events if "cholesky" in e.path]
@@ -178,7 +182,9 @@ class TestFix2EmissionOnly:
 
         # scan[1] carry taps fire as normal
         scan1_carry = [e for e in events if "scan[1]" in e.path]
-        assert len(scan1_carry) == N, f"expected {N} scan[1] carry events, got {len(scan1_carry)}"
+        assert len(scan1_carry) == N, (
+            f"expected {N} scan[1] carry events, got {len(scan1_carry)}"
+        )
 
     def test_max_depth_emission_only_prim_fires_deeper(self):
         """
@@ -218,7 +224,9 @@ class TestFix2EmissionOnly:
         )
 
         # Inner scan (depth 1 > max_depth=0) does NOT emit carry taps
-        inner_carry = [e for e in events if "scan[0]/scan[0]" in e.path and "sin" not in e.path]
+        inner_carry = [
+            e for e in events if "scan[0]/scan[0]" in e.path and "sin" not in e.path
+        ]
         assert len(inner_carry) == 0, (
             f"inner carry should be suppressed at depth 1, got {len(inner_carry)}"
         )
@@ -296,7 +304,9 @@ class TestFix2EmissionOnly:
         )(carry0)
         jax.block_until_ready(got)
 
-        assert bitwise_eq(ref, got), "addressing-stable ops filter result not bitwise identical"
+        assert bitwise_eq(ref, got), (
+            "addressing-stable ops filter result not bitwise identical"
+        )
 
         paths = {e.path for e in events}
 
@@ -383,7 +393,9 @@ class TestFix1SampleEveryGatesPrimTaps:
                 f"se={se}: outside-loop prim tap should always fire (got {len(chol_events)})"
             )
             assert chol_events[0].step == -1, "outside-loop step must be -1"
-            assert bitwise_eq(ref, got), f"se={se}: outside-loop result not bitwise identical"
+            assert bitwise_eq(ref, got), (
+                f"se={se}: outside-loop result not bitwise identical"
+            )
 
     def test_prim_tap_gating_bitwise_identity(self):
         """
@@ -410,7 +422,9 @@ class TestFix1SampleEveryGatesPrimTaps:
             )(x)
             jax.block_until_ready(got)
 
-            assert bitwise_eq(ref, got), f"se={se}: prim tap gating broke bitwise identity"
+            assert bitwise_eq(ref, got), (
+                f"se={se}: prim tap gating broke bitwise identity"
+            )
 
     def test_once_composes_with_gate(self):
         """
@@ -440,7 +454,9 @@ class TestFix1SampleEveryGatesPrimTaps:
             got = tap.verbose(
                 f,
                 on_step=lambda e: events.append(e),
-                taps=[tap.on("sin", alert=lambda v: True, label="test-once", once=True)],
+                taps=[
+                    tap.on("sin", alert=lambda v: True, label="test-once", once=True)
+                ],
                 sample_every=10,
             )(x)
             jax.block_until_ready(got)
@@ -455,7 +471,9 @@ class TestFix1SampleEveryGatesPrimTaps:
 
         # on_step receives 3 events (steps 0, 10, 20)
         sin_events = [e for e in events if "sin" in e.path]
-        assert len(sin_events) == 3, f"expected 3 sin events at se=10 N=30, got {len(sin_events)}"
+        assert len(sin_events) == 3, (
+            f"expected 3 sin events at se=10 N=30, got {len(sin_events)}"
+        )
 
     def test_carry_tap_and_prim_tap_both_gated(self):
         """
@@ -487,7 +505,9 @@ class TestFix1SampleEveryGatesPrimTaps:
         assert len(carry_events) == N // se, (
             f"expected {N // se} carry events, got {len(carry_events)}"
         )
-        assert len(sin_events) == N // se, f"expected {N // se} sin events, got {len(sin_events)}"
+        assert len(sin_events) == N // se, (
+            f"expected {N // se} sin events, got {len(sin_events)}"
+        )
 
     def test_prim_tap_se_gating_fired_steps_are_correct(self):
         """
@@ -589,7 +609,9 @@ class TestFix3PathAwareSelect:
         assert len(scan_events) == N
 
         # select received the correct path at trace time (at least once)
-        assert len(received_paths) >= 1, "select must be called at least once (trace time)"
+        assert len(received_paths) >= 1, (
+            "select must be called at least once (trace time)"
+        )
         assert "scan[0]" in received_paths, (
             f"expected 'scan[0]' in received paths, got {received_paths}"
         )
@@ -623,7 +645,9 @@ class TestFix3PathAwareSelect:
         scan_events = [e for e in events if e.path == "scan[0]"]
         assert len(scan_events) == N
         # select is called at JAX trace time (once per body trace, not per step)
-        assert len(received_paths) >= 1, "select must be called at least once (trace time)"
+        assert len(received_paths) >= 1, (
+            "select must be called at least once (trace time)"
+        )
         assert "scan[0]" in received_paths, (
             f"expected 'scan[0]' in received paths, got {received_paths}"
         )
@@ -674,7 +698,9 @@ class TestFix3PathAwareSelect:
         # select is called at JAX trace time (once per body trace, not per step).
         # Verify the correct paths were seen at trace time.
         seen_paths = {p for (_, p) in path_by_event}
-        assert "scan[0]" in seen_paths, f"expected 'scan[0]' in trace-time paths, got {seen_paths}"
+        assert "scan[0]" in seen_paths, (
+            f"expected 'scan[0]' in trace-time paths, got {seen_paths}"
+        )
         assert "scan[0]/scan[0]" in seen_paths, (
             f"expected 'scan[0]/scan[0]' in trace-time paths, got {seen_paths}"
         )
@@ -712,7 +738,9 @@ class TestFix3PathAwareSelect:
 
         # select is called at JAX trace time (once per body trace).
         # At least one call must have happened with a path containing "sin".
-        assert len(received_prim_paths) >= 1, "per-tap select must be called at trace time"
+        assert len(received_prim_paths) >= 1, (
+            "per-tap select must be called at trace time"
+        )
         assert any("sin" in p for p in received_prim_paths), (
             f"expected 'sin' in some prim path, got {received_prim_paths}"
         )

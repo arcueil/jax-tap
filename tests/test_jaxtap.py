@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -193,12 +193,16 @@ def test_jit_composition():
 
     # verbose(jit(f)) — walker recurses through the jit eqn
     events1: list[tap.TapEvent] = []
-    got1 = tap.verbose(jax.jit(_nested_scan), on_step=lambda e: events1.append(e))(x0, xs)
+    got1 = tap.verbose(jax.jit(_nested_scan), on_step=lambda e: events1.append(e))(
+        x0, xs
+    )
     jax.block_until_ready(got1)
 
     # jit(verbose(f)) — the instrumented function is itself jittable
     events2: list[tap.TapEvent] = []
-    got2 = jax.jit(tap.verbose(_nested_scan, on_step=lambda e: events2.append(e)))(x0, xs)
+    got2 = jax.jit(tap.verbose(_nested_scan, on_step=lambda e: events2.append(e)))(
+        x0, xs
+    )
     jax.block_until_ready(got2)
 
     assert bitwise_eq(ref, got1), "verbose(jit(f)) not bitwise identical"
@@ -329,8 +333,12 @@ def test_ops_filtering():
     # Scan only — while suppressed; scan address is UNCHANGED (still index 1)
     _, ev_scan = _collect(f, carry0, ops=("scan",))
     paths_scan = {e.path for e in ev_scan}
-    assert "scan[1]" in paths_scan, "scan index changed when while was filtered — counter reset"
-    assert not any("while" in p for p in paths_scan), "while events appeared despite filtering"
+    assert "scan[1]" in paths_scan, (
+        "scan index changed when while was filtered — counter reset"
+    )
+    assert not any("while" in p for p in paths_scan), (
+        "while events appeared despite filtering"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +367,9 @@ def test_callback_totality():
         jax.block_until_ready(got)
 
     assert bitwise_eq(ref, got), "result corrupted by raising callback"
-    assert len(warn_list.list) == 1, f"expected exactly 1 warning, got {len(warn_list.list)}"
+    assert len(warn_list.list) == 1, (
+        f"expected exactly 1 warning, got {len(warn_list.list)}"
+    )
     assert call_count[0] == N, "callback must be attempted every step"
 
     # --- Part 2: under warnings.simplefilter("error") no exception propagates ---
@@ -509,7 +519,9 @@ def test_vmap_safety():
     ref = jax.vmap(scan_f)(carry_batch, xs_batch)
 
     events: list[tap.TapEvent] = []
-    got = jax.vmap(tap.verbose(scan_f, on_step=lambda e: events.append(e)))(carry_batch, xs_batch)
+    got = jax.vmap(tap.verbose(scan_f, on_step=lambda e: events.append(e)))(
+        carry_batch, xs_batch
+    )
     jax.block_until_ready(got)
 
     assert bitwise_eq(ref, got), "vmap(verbose(f)) not bitwise identical"
@@ -542,7 +554,9 @@ def test_grad_through_transform():
         lambda c: jnp.sum(tap.verbose(_simple_scan, on_step=lambda e: None)(c, xs)[1])
     )(carry0)
     jax.block_until_ready(got_g_plain)
-    assert bitwise_eq(ref_g_plain, got_g_plain), "grad through plain scan not bitwise identical"
+    assert bitwise_eq(ref_g_plain, got_g_plain), (
+        "grad through plain scan not bitwise identical"
+    )
 
     # --- loss containing @custom_jvp (softplus) ---
     def step(c, x):
@@ -556,11 +570,13 @@ def test_grad_through_transform():
         return jnp.sum(ys)
 
     ref_g_cjvp = jax.grad(custom_jvp_loss)(carry0)
-    got_g_cjvp = jax.grad(lambda c: jnp.sum(tap.verbose(scan_f, on_step=lambda e: None)(c, xs)[1]))(
-        carry0
-    )
+    got_g_cjvp = jax.grad(
+        lambda c: jnp.sum(tap.verbose(scan_f, on_step=lambda e: None)(c, xs)[1])
+    )(carry0)
     jax.block_until_ready(got_g_cjvp)
-    assert bitwise_eq(ref_g_cjvp, got_g_cjvp), "grad through custom_jvp scan not bitwise identical"
+    assert bitwise_eq(ref_g_cjvp, got_g_cjvp), (
+        "grad through custom_jvp scan not bitwise identical"
+    )
 
 
 def test_custom_jvp_sentinel_rule():
@@ -593,7 +609,9 @@ def test_custom_jvp_sentinel_rule():
     got_g = jax.grad(tap.verbose(sentinel_loss, on_step=lambda e: None))(theta)
     jax.block_until_ready(got_g)
 
-    assert bitwise_eq(ref_g, got_g), "sentinel JVP grad not bitwise identical through verbose"
+    assert bitwise_eq(ref_g, got_g), (
+        "sentinel JVP grad not bitwise identical through verbose"
+    )
     # 42^3 = 74088 confirms sentinel rule active; primal autodiff would give ~35
     assert float(got_g) == 74088.0, (
         f"sentinel JVP chain rule broken: expected 74088.0 (42^3), got {float(got_g)}"
@@ -639,7 +657,9 @@ def test_custom_vjp_through_transform():
     ref_g = jax.grad(loss_vjp)(theta)
     got_g = jax.grad(tap.verbose(loss_vjp, on_step=lambda e: None))(theta)
     jax.block_until_ready(got_g)
-    assert bitwise_eq(ref_g, got_g), "custom_vjp grad not bitwise identical through verbose"
+    assert bitwise_eq(ref_g, got_g), (
+        "custom_vjp grad not bitwise identical through verbose"
+    )
     # 7^3 = 343 proves VJP sentinel rule is active, not cos(x)-based autodiff
     assert float(got_g) == 343.0, (
         f"sentinel VJP chain rule broken: expected 343.0 (7^3), got {float(got_g)}"
@@ -699,7 +719,9 @@ def test_scan_in_cond_f1():
     got_f, events_f = _collect(f_cond, pred_false, x0)
     jax.block_until_ready(got_f)
     assert bitwise_eq(ref_f, got_f), "cond false-branch result not bitwise identical"
-    assert len(events_f) == 0, f"false branch (no scan) should emit 0 events, got {len(events_f)}"
+    assert len(events_f) == 0, (
+        f"false branch (no scan) should emit 0 events, got {len(events_f)}"
+    )
 
 
 def test_scan_in_switch_f1():
@@ -720,7 +742,9 @@ def test_scan_in_switch_f1():
 
             return branch
 
-        return jax.lax.switch(i, [make_branch(1.0), make_branch(2.0), make_branch(3.0)], x0_)
+        return jax.lax.switch(
+            i, [make_branch(1.0), make_branch(2.0), make_branch(3.0)], x0_
+        )
 
     for branch_idx in range(3):
         i = jnp.int32(branch_idx)
@@ -728,7 +752,9 @@ def test_scan_in_switch_f1():
         got, events = _collect(f_switch, i, x0)
         jax.block_until_ready(got)
 
-        assert bitwise_eq(ref, got), f"switch branch {branch_idx} result not bitwise identical"
+        assert bitwise_eq(ref, got), (
+            f"switch branch {branch_idx} result not bitwise identical"
+        )
         scan_events = [e for e in events if "scan" in e.path]
         assert len(scan_events) == N, (
             f"branch {branch_idx}: expected {N} events, got {len(scan_events)}"
@@ -768,7 +794,9 @@ def test_scan_in_checkpoint_f1():
         f"expected {N} events from scan inside checkpoint, got {len(scan_events)}"
     )
     paths = {e.path for e in scan_events}
-    assert any("remat[0]" in p for p in paths), f"expected remat[0]/... path, got {sorted(paths)}"
+    assert any("remat[0]" in p for p in paths), (
+        f"expected remat[0]/... path, got {sorted(paths)}"
+    )
 
 
 def test_checkpoint_grad_bitwise():
@@ -835,7 +863,9 @@ def test_jit_addressing_uniqueness_f2():
     assert len(distinct_paths) == 2, (
         f"expected 2 distinct paths (top-level + jit-nested), got {sorted(distinct_paths)}"
     )
-    assert "scan[0]" in distinct_paths, f"top-level scan[0] path missing: {sorted(distinct_paths)}"
+    assert "scan[0]" in distinct_paths, (
+        f"top-level scan[0] path missing: {sorted(distinct_paths)}"
+    )
     assert any("jit" in p for p in distinct_paths), (
         f"jit-nested path missing: {sorted(distinct_paths)}"
     )
@@ -861,7 +891,9 @@ def test_jit_boundary_path_format():
     got2, events2 = _collect(_nested_scan, x0, xs)
     jax.block_until_ready(got2)
 
-    assert bitwise_eq(got1, got2), "verbose(jit(f)) != verbose(f) (not bitwise identical)"
+    assert bitwise_eq(got1, got2), (
+        "verbose(jit(f)) != verbose(f) (not bitwise identical)"
+    )
 
     # Event counts must match
     assert len(events1) == len(events2), (
@@ -870,7 +902,9 @@ def test_jit_boundary_path_format():
 
     paths1 = {e.path for e in events1}
     # Paths with jit boundary
-    assert "jit[0]/scan[0]" in paths1, f"expected jit[0]/scan[0] path, got {sorted(paths1)}"
+    assert "jit[0]/scan[0]" in paths1, (
+        f"expected jit[0]/scan[0] path, got {sorted(paths1)}"
+    )
     assert "jit[0]/scan[0]/scan[0]" in paths1, (
         f"expected jit[0]/scan[0]/scan[0] path, got {sorted(paths1)}"
     )
@@ -923,7 +957,9 @@ def test_prim_tap_basic_in_scan():
     jax.block_until_ready(got)
 
     assert bitwise_eq(ref, got), "primitive tap broke bitwise identity"
-    assert len(prim_events) == N, f"expected {N} cholesky events, got {len(prim_events)}"
+    assert len(prim_events) == N, (
+        f"expected {N} cholesky events, got {len(prim_events)}"
+    )
     assert sorted(e.step for e in prim_events) == list(range(N)), (
         f"step values wrong: {[e.step for e in prim_events]}"
     )
@@ -949,11 +985,15 @@ def test_prim_tap_jit_hidden_cholesky():
 
     ref = f(x0)
     events: list[tap.TapEvent] = []
-    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(x0)
+    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(
+        x0
+    )
     jax.block_until_ready(got)
 
     chol_events = [e for e in events if "cholesky" in e.path]
-    assert len(chol_events) == N, f"expected {N} cholesky events, got {len(chol_events)}"
+    assert len(chol_events) == N, (
+        f"expected {N} cholesky events, got {len(chol_events)}"
+    )
 
     paths = {e.path for e in chol_events}
     # jit boundary must be visible in the path
@@ -979,12 +1019,18 @@ def test_prim_tap_outside_loop():
     x = jnp.float32(1.0)
     ref = f(x)
     events: list[tap.TapEvent] = []
-    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(x)
+    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(
+        x
+    )
     jax.block_until_ready(got)
 
     chol_events = [e for e in events if "cholesky" in e.path]
-    assert len(chol_events) == 1, f"expected 1 outside-loop cholesky event, got {len(chol_events)}"
-    assert chol_events[0].step == -1, f"outside-loop step must be -1, got {chol_events[0].step}"
+    assert len(chol_events) == 1, (
+        f"expected 1 outside-loop cholesky event, got {len(chol_events)}"
+    )
+    assert chol_events[0].step == -1, (
+        f"outside-loop step must be -1, got {chol_events[0].step}"
+    )
     assert bitwise_eq(ref, got), "outside-loop tap broke bitwise identity"
 
 
@@ -1011,13 +1057,17 @@ def test_prim_tap_select_none_and_bool():
     # Re-run cleanly to collect only chol events
     events_none.clear()
     all_events: list[tap.TapEvent] = []
-    got = tap.verbose(f, on_step=lambda e: all_events.append(e), taps=[tap.on("cholesky")])(x0)
+    got = tap.verbose(
+        f, on_step=lambda e: all_events.append(e), taps=[tap.on("cholesky")]
+    )(x0)
     jax.block_until_ready(got)
 
     chol_none = [e for e in all_events if "cholesky" in e.path]
     assert len(chol_none) == N, f"expected {N} cholesky events, got {len(chol_none)}"
     for e in chol_none:
-        assert isinstance(e.value, tuple), f"select=None must give tuple, got {type(e.value)}"
+        assert isinstance(e.value, tuple), (
+            f"select=None must give tuple, got {type(e.value)}"
+        )
 
     # select reducing to bool scalar
     all_events2: list[tap.TapEvent] = []
@@ -1063,7 +1113,9 @@ def test_prim_tap_multiple_sites_same_level():
     assert any("sin[0]" in p for p in paths), f"sin[0] not in {sorted(paths)}"
     assert any("sin[1]" in p for p in paths), f"sin[1] not in {sorted(paths)}"
     # 3 steps × 2 sin sites = 6 events
-    assert len(sin_events) == 6, f"expected 6 events (3 steps × 2 sites), got {len(sin_events)}"
+    assert len(sin_events) == 6, (
+        f"expected 6 events (3 steps × 2 sites), got {len(sin_events)}"
+    )
     assert bitwise_eq(ref, got), "multiple-sites tap broke bitwise identity"
 
 
@@ -1089,7 +1141,9 @@ def test_prim_tap_nested_scan_step():
     x = jnp.float32(0.0)
     ref = f(x)
     events: list[tap.TapEvent] = []
-    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(x)
+    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(
+        x
+    )
     jax.block_until_ready(got)
 
     chol_events = [e for e in events if "cholesky" in e.path]
@@ -1126,7 +1180,9 @@ def test_prim_tap_grad_bitwise():
 
     ref_g = jax.grad(loss)(x0)
     got_g = jax.grad(
-        lambda x: jnp.sum(tap.verbose(f, on_step=lambda e: None, taps=[tap.on("cholesky")])(x)[1])
+        lambda x: jnp.sum(
+            tap.verbose(f, on_step=lambda e: None, taps=[tap.on("cholesky")])(x)[1]
+        )
     )(x0)
     jax.block_until_ready(got_g)
 
@@ -1204,7 +1260,9 @@ def test_prim_tap_filtered_loop_silent():
     jax.block_until_ready(got)
 
     # Result must still be bitwise identical
-    assert np.array_equal(np.asarray(ref), np.asarray(got)), "filtered result not bitwise identical"
+    assert np.array_equal(np.asarray(ref), np.asarray(got)), (
+        "filtered result not bitwise identical"
+    )
 
     # M1d: cholesky FIRES inside the where-filtered scan[0] body
     chol_events = [e for e in events if "cholesky" in e.path]
@@ -1221,4 +1279,6 @@ def test_prim_tap_filtered_loop_silent():
 
     # scan[1] carry taps still fire
     scan1_events = [e for e in events if "scan[1]" in e.path]
-    assert len(scan1_events) == N, f"expected {N} scan[1] carry events, got {len(scan1_events)}"
+    assert len(scan1_events) == N, (
+        f"expected {N} scan[1] carry events, got {len(scan1_events)}"
+    )

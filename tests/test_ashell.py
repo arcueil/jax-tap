@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -121,7 +121,9 @@ def test_ashell_delete_with():
         pass  # no scan called
 
     assert jax.lax.scan is _original_scan, "lax.scan not restored after empty with"
-    assert jax.lax.while_loop is _original_while, "while_loop not restored after empty with"
+    assert jax.lax.while_loop is _original_while, (
+        "while_loop not restored after empty with"
+    )
     assert len(rec_inner.events) == 0
 
     # Calling the scan outside a context emits nothing and returns correct value
@@ -167,7 +169,9 @@ def test_ashell_no_double_instrumentation():
     )
     # Concrete values for the report
     assert ctx_outer == N_OUTER, f"outer expected {N_OUTER}, got {ctx_outer}"
-    assert ctx_inner == N_OUTER * INNER_N, f"inner expected {N_OUTER * INNER_N}, got {ctx_inner}"
+    assert ctx_inner == N_OUTER * INNER_N, (
+        f"inner expected {N_OUTER * INNER_N}, got {ctx_inner}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +224,9 @@ def test_ashell_primitive_taps():
     jax.block_until_ready(got)
     assert bitwise_eq(ref, got), "primitive tap broke bitwise identity in A-shell"
     chol_events = [e for e in rec.events if "cholesky" in e.path]
-    assert len(chol_events) == N, f"expected {N} cholesky events, got {len(chol_events)}"
+    assert len(chol_events) == N, (
+        f"expected {N} cholesky events, got {len(chol_events)}"
+    )
     assert sorted(e.step for e in chol_events) == list(range(N))
 
 
@@ -242,7 +248,9 @@ def test_ashell_exception_restores():
             raise RuntimeError("intentional")
 
     assert jax.lax.scan is _original_scan, "lax.scan not restored after exception"
-    assert jax.lax.while_loop is _original_while, "while_loop not restored after exception"
+    assert jax.lax.while_loop is _original_while, (
+        "while_loop not restored after exception"
+    )
     assert len(_context_registry) == 0, "registry not empty after exception"
     # Events collected before the exception are accessible
     assert len(rec.events) > 0, "expected events before the exception"
@@ -553,7 +561,9 @@ def test_ashell_on_step_aform():
 
     assert bitwise_eq(ref, got), "on_step passthrough broke bitwise identity"
     assert len(rec.events) == N, f"recorder expected {N} events, got {len(rec.events)}"
-    assert len(live_events) == N, f"live callback expected {N} events, got {len(live_events)}"
+    assert len(live_events) == N, (
+        f"live callback expected {N} events, got {len(live_events)}"
+    )
     # Both should have seen the same events (same steps, same paths)
     assert [e.step for e in rec.events] == [e.step for e in live_events]
 
@@ -610,7 +620,9 @@ def test_ashell_on_step_bform():
 
     assert bitwise_eq(ref, got), "B-form on_step broke bitwise identity"
     assert len(rec.events) == N, f"recorder expected {N} events, got {len(rec.events)}"
-    assert len(live_events) == N, f"live callback expected {N} events, got {len(live_events)}"
+    assert len(live_events) == N, (
+        f"live callback expected {N} events, got {len(live_events)}"
+    )
 
 
 # ===========================================================================
@@ -646,7 +658,9 @@ def test_ashell_scan_positional_unroll():
     def body(c, x):
         return c + x, c
 
-    ref = jax.lax.scan(body, jnp.float32(0.0), xs, None, False, 2)  # unroll=2 positional
+    ref = jax.lax.scan(
+        body, jnp.float32(0.0), xs, None, False, 2
+    )  # unroll=2 positional
 
     with tap.record() as rec:
         got = jax.lax.scan(body, jnp.float32(0.0), xs, None, False, 2)
@@ -726,7 +740,9 @@ def test_ashell_python_loop_five_scans():
     paths = sorted({e.path for e in rec.events})
     expected_paths = [f"scan[{i}]" for i in range(N)]
     assert paths == expected_paths, f"expected {expected_paths}, got {paths}"
-    assert len(rec.events) == N * N, f"expected {N * N} total events, got {len(rec.events)}"
+    assert len(rec.events) == N * N, (
+        f"expected {N * N} total events, got {len(rec.events)}"
+    )
 
 
 def test_ashell_scan_cond_scan_divergence_pin():
@@ -788,7 +804,9 @@ def test_ashell_reenter_raises():
     from jaxtap._ashell import _context_registry, _original_scan, _original_while
 
     assert jax.lax.scan is _original_scan, "lax.scan not restored after re-enter error"
-    assert jax.lax.while_loop is _original_while, "while_loop not restored after re-enter error"
+    assert jax.lax.while_loop is _original_while, (
+        "while_loop not restored after re-enter error"
+    )
     assert len(_context_registry) == 0, "registry not empty after re-enter error"
 
 
@@ -810,7 +828,9 @@ def test_ashell_emergency_restore():
     jaxtap.emergency_restore()
 
     assert jax.lax.scan is _original_scan, "scan not restored by emergency_restore"
-    assert jax.lax.while_loop is _original_while, "while_loop not restored by emergency_restore"
+    assert jax.lax.while_loop is _original_while, (
+        "while_loop not restored by emergency_restore"
+    )
     from jaxtap._ashell import _context_registry, _session_scan, _session_while
 
     assert len(_context_registry) == 0, "registry not empty after emergency_restore"
@@ -843,7 +863,9 @@ def test_ashell_double_exit_noop():
         ctx.__exit__(None, None, None)
 
     jaxtap_warns = [x for x in w if "jaxtap" in str(x.message)]
-    assert len(jaxtap_warns) == 0, f"double-exit emitted unexpected warning: {jaxtap_warns}"
+    assert len(jaxtap_warns) == 0, (
+        f"double-exit emitted unexpected warning: {jaxtap_warns}"
+    )
     assert jax.lax.scan is _original_scan, "scan was corrupted by double-exit"
 
 
@@ -943,7 +965,9 @@ def test_ashell_gc_selfheal():
 
     assert jax.lax.scan is not _patched_scan, "GC self-heal: scan still patched"
     assert jax.lax.scan is _original_scan, "GC self-heal: scan not restored to original"
-    assert jax.lax.while_loop is _original_while, "GC self-heal: while_loop not restored"
+    assert jax.lax.while_loop is _original_while, (
+        "GC self-heal: while_loop not restored"
+    )
     assert len(_context_registry) == 0, "GC self-heal: registry not empty"
 
 
@@ -968,7 +992,9 @@ def test_ashell_verbose_inside_context_no_double():
         jax.block_until_ready(got)
 
     assert bitwise_eq(ref, got), "verbose inside context: result wrong"
-    assert len(user_events) == N, f"user callback: expected {N} events, got {len(user_events)}"
+    assert len(user_events) == N, (
+        f"user callback: expected {N} events, got {len(user_events)}"
+    )
     assert len(rec_ctx.events) == 0, (
         f"context recorder: expected 0 events from explicit verbose() call, "
         f"got {len(rec_ctx.events)}"

@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -173,7 +173,8 @@ propagate the current ``_in_loop`` unchanged.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -419,7 +420,14 @@ def _interp(
                     and (max_depth is None or depth <= max_depth)
                 )
                 outvals = rewrite_scan(
-                    eqn, invals, tap_cb, ops, here, _recurse, step, emit_carry=emit_carry
+                    eqn,
+                    invals,
+                    tap_cb,
+                    ops,
+                    here,
+                    _recurse,
+                    step,
+                    emit_carry=emit_carry,
                 )
 
             elif prim_name == "while":
@@ -432,7 +440,14 @@ def _interp(
                     and (max_depth is None or depth <= max_depth)
                 )
                 outvals = rewrite_while(
-                    eqn, invals, tap_cb, ops, here, _recurse, step, emit_carry=emit_carry
+                    eqn,
+                    invals,
+                    tap_cb,
+                    ops,
+                    here,
+                    _recurse,
+                    step,
+                    emit_carry=emit_carry,
                 )
 
             elif prim_name == "cond":
@@ -444,7 +459,9 @@ def _interp(
                 index = invals[0]  # int32 branch selector
                 operands = invals[1:]  # shared operands for all branches
 
-                def _make_branch(branch_jaxpr: "jax_core.ClosedJaxpr", branch_idx: int) -> Callable:
+                def _make_branch(
+                    branch_jaxpr: "jax_core.ClosedJaxpr", branch_idx: int
+                ) -> Callable:
                     branch_path = f"{path}cond[{cf_index}]/b{branch_idx}/"
                     # Capture step and total via default args so each branch closure
                     # holds the correct values at definition time.
@@ -467,9 +484,13 @@ def _interp(
 
                     return branch_fn
 
-                instrumented_branches = [_make_branch(b, j) for j, b in enumerate(branches)]
+                instrumented_branches = [
+                    _make_branch(b, j) for j, b in enumerate(branches)
+                ]
                 result = jax.lax.switch(index, instrumented_branches, *operands)
-                outvals = list(result) if isinstance(result, (list, tuple)) else [result]
+                outvals = (
+                    list(result) if isinstance(result, (list, tuple)) else [result]
+                )
 
             elif prim_name == "remat2":
                 # F1 fix: recurse inside remat2 sub-jaxpr, re-emit through
@@ -491,12 +512,16 @@ def _interp(
                     _s: Any = _step,
                     _t: "int | None" = _total,
                 ) -> tuple:
-                    return tuple(_recurse(_j, [], list(flat_in), tap_cb, ops, _p, _s, _t))
+                    return tuple(
+                        _recurse(_j, [], list(flat_in), tap_cb, ops, _p, _s, _t)
+                    )
 
-                result = jax.checkpoint(_inner_remat, prevent_cse=prevent_cse, policy=policy)(
-                    *invals
+                result = jax.checkpoint(
+                    _inner_remat, prevent_cse=prevent_cse, policy=policy
+                )(*invals)
+                outvals = (
+                    list(result) if isinstance(result, (list, tuple)) else [result]
                 )
-                outvals = list(result) if isinstance(result, (list, tuple)) else [result]
 
             elif prim_name in _JIT_PRIMS:
                 # F2 fix: make jit boundary visible in path (jit[k]/ prefix).
@@ -529,7 +554,9 @@ def _interp(
                     )
 
                 result = jax.jit(_inner_jit)(*invals, step)
-                outvals = list(result) if isinstance(result, (list, tuple)) else [result]
+                outvals = (
+                    list(result) if isinstance(result, (list, tuple)) else [result]
+                )
 
             else:
                 # Higher-order primitive not handled (e.g. scan/while not in ops):
@@ -569,7 +596,9 @@ def _interp(
                     n_prim_tap[prim_name] = j + 1
                     tap_path = f"{path}{prim_name}[{j}]"
                     for spec in matching:
-                        prim_tap_fn(tap_path, step, tuple(outvals), spec, total, _in_loop)
+                        prim_tap_fn(
+                            tap_path, step, tuple(outvals), spec, total, _in_loop
+                        )
 
         for v, val in zip(eqn.outvars, outvals):
             env[v] = val

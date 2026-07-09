@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -76,7 +76,9 @@ def test_grad_cond_bitwise():
 
     c0 = jnp.float32(0.5)
     gref = jax.grad(lambda c: f_cond(jnp.float32(1.0), c))(c0)
-    ggot = jax.grad(lambda c: tap.verbose(f_cond, on_step=lambda e: None)(jnp.float32(1.0), c))(c0)
+    ggot = jax.grad(
+        lambda c: tap.verbose(f_cond, on_step=lambda e: None)(jnp.float32(1.0), c)
+    )(c0)
     jax.block_until_ready(ggot)
     assert _bw(gref, ggot), (
         f"grad(cond) not bitwise identical: ref={float(gref):.6f} got={float(ggot):.6f}"
@@ -96,7 +98,9 @@ def test_grad_switch_bitwise():
 
     c0 = jnp.float32(0.5)
     gref = jax.grad(lambda c: f_switch(jnp.int32(2), c))(c0)
-    ggot = jax.grad(lambda c: tap.verbose(f_switch, on_step=lambda e: None)(jnp.int32(2), c))(c0)
+    ggot = jax.grad(
+        lambda c: tap.verbose(f_switch, on_step=lambda e: None)(jnp.int32(2), c)
+    )(c0)
     jax.block_until_ready(ggot)
     assert _bw(gref, ggot), (
         f"grad(switch) not bitwise identical: ref={float(gref):.6f} got={float(ggot):.6f}"
@@ -203,12 +207,16 @@ def test_where_across_jit_boundary():
     c0 = jnp.float32(0.5)
     ref = _jit_nested(c0)
     events: list = []
-    got = tap.verbose(_jit_nested, on_step=events.append, where=lambda p: p.startswith("jit"))(c0)
+    got = tap.verbose(
+        _jit_nested, on_step=events.append, where=lambda p: p.startswith("jit")
+    )(c0)
     jax.block_until_ready(got)
 
     assert _bw(ref, got), "where filter across jit boundary must not perturb output"
     paths = sorted({e.path for e in events})
-    assert paths == ["jit[1]/scan[0]"], f"where(jit) should select only jit[1]/scan[0], got {paths}"
+    assert paths == ["jit[1]/scan[0]"], (
+        f"where(jit) should select only jit[1]/scan[0], got {paths}"
+    )
 
 
 def test_grad2_cond_bitwise():
@@ -289,7 +297,9 @@ def test_higher_order_autodiff():
     xs3 = jnp.arange(1.0, 4.0, dtype=jnp.float32)
 
     def scan_f(theta):
-        final, _ = jax.lax.scan(lambda c, x: (c * jnp.sin(c) + theta * x, c), theta, xs3)
+        final, _ = jax.lax.scan(
+            lambda c, x: (c * jnp.sin(c) + theta * x, c), theta, xs3
+        )
         return final
 
     theta = jnp.float32(0.7)
@@ -298,7 +308,9 @@ def test_higher_order_autodiff():
     g_ref = jax.grad(scan_f)(theta)
     g_got = jax.grad(v)(theta)
     jax.block_until_ready(g_got)
-    assert _bw(g_ref, g_got), f"grad not bitwise: ref={float(g_ref):.6f} got={float(g_got):.6f}"
+    assert _bw(g_ref, g_got), (
+        f"grad not bitwise: ref={float(g_ref):.6f} got={float(g_got):.6f}"
+    )
 
     g2_ref = jax.grad(jax.grad(scan_f))(theta)
     g2_got = jax.grad(jax.grad(v))(theta)
@@ -323,7 +335,9 @@ def test_hessian_through_verbose():
     xs2 = jnp.arange(1.0, 4.0, dtype=jnp.float32)
 
     def scan_vec(p):
-        final, _ = jax.lax.scan(lambda c, x: (c * c + p[0] * x + p[1], c), p[0] + p[1], xs2)
+        final, _ = jax.lax.scan(
+            lambda c, x: (c * c + p[0] * x + p[1], c), p[0] + p[1], xs2
+        )
         return final
 
     p = jnp.array([0.3, 0.5], dtype=jnp.float32)
@@ -506,7 +520,9 @@ def test_while_prim_tap_live_steps():
 
     assert _bw(ref, got), "while prim-tap result not bitwise identical"
     chol_steps = sorted(e.step for e in events if "cholesky" in e.path)
-    assert chol_steps == list(range(5)), f"while prim-tap: expected steps 0..4, got {chol_steps}"
+    assert chol_steps == list(range(5)), (
+        f"while prim-tap: expected steps 0..4, got {chol_steps}"
+    )
 
 
 # ---------------------------------------------------------------------------

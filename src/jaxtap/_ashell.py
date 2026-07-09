@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -126,8 +126,9 @@ import threading
 import uuid
 import warnings
 import weakref
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Callable, Generator, Sequence
+from typing import TYPE_CHECKING, Any
 
 import jax
 
@@ -207,7 +208,9 @@ def _cleanup(key: str) -> None:
         _context_registry.pop(key, None)
         if not _context_registry:
             if jax.lax.scan is _patched_scan:
-                jax.lax.scan = _session_scan if _session_scan is not None else _original_scan
+                jax.lax.scan = (
+                    _session_scan if _session_scan is not None else _original_scan
+                )
             _session_scan = None
             if jax.lax.while_loop is _patched_while:
                 jax.lax.while_loop = (
@@ -242,7 +245,9 @@ def emergency_restore() -> None:
     with _registry_lock:
         _context_registry.clear()
         if jax.lax.scan is _patched_scan:
-            jax.lax.scan = _session_scan if _session_scan is not None else _original_scan
+            jax.lax.scan = (
+                _session_scan if _session_scan is not None else _original_scan
+            )
         else:
             warnings.warn(
                 "jaxtap.emergency_restore: jax.lax.scan is not our patch "
@@ -251,7 +256,9 @@ def emergency_restore() -> None:
                 stacklevel=2,
             )
         if jax.lax.while_loop is _patched_while:
-            jax.lax.while_loop = _session_while if _session_while is not None else _original_while
+            jax.lax.while_loop = (
+                _session_while if _session_while is not None else _original_while
+            )
         else:
             warnings.warn(
                 "jaxtap.emergency_restore: jax.lax.while_loop is not our patch "
@@ -316,7 +323,11 @@ def _active_contexts() -> "list[_RecordContext]":
     Takes a lock-free snapshot of registry values and drops any dead refs
     (contexts that were GC'd between the snapshot and the dereference).
     """
-    return [ctx for ctx in (r() for r in list(_context_registry.values())) if ctx is not None]
+    return [
+        ctx
+        for ctx in (r() for r in list(_context_registry.values()))
+        if ctx is not None
+    ]
 
 
 def _select_ctx(active: "list[_RecordContext]") -> "_RecordContext | None":
@@ -558,7 +569,11 @@ class _RecordContext:
         return k
 
     def __enter__(self) -> "FlightRecorder":
-        global _session_scan, _session_while, _clobber_scan_warned, _clobber_while_warned
+        global \
+            _session_scan, \
+            _session_while, \
+            _clobber_scan_warned, \
+            _clobber_while_warned
 
         # L1: re-entrancy guard — reusing the SAME context object in nested
         # with-blocks overwrites self._key, orphaning the first registry entry
@@ -608,7 +623,11 @@ class _RecordContext:
         return self._recorder
 
     def __exit__(self, *exc: Any) -> None:
-        global _session_scan, _session_while, _clobber_scan_warned, _clobber_while_warned
+        global \
+            _session_scan, \
+            _session_while, \
+            _clobber_scan_warned, \
+            _clobber_while_warned
 
         # L2: detach the GC finalizer — normal exit path handles cleanup below.
         if self._finalizer is not None:
@@ -632,7 +651,9 @@ class _RecordContext:
 
                 # scan restore
                 if jax.lax.scan is _patched_scan:
-                    jax.lax.scan = _session_scan if _session_scan is not None else _original_scan
+                    jax.lax.scan = (
+                        _session_scan if _session_scan is not None else _original_scan
+                    )
                 elif not _clobber_scan_warned:
                     # Foreign patch installed OVER us: leave it, warn once.
                     _clobber_scan_warned = True
@@ -651,7 +672,9 @@ class _RecordContext:
                 # while_loop restore
                 if jax.lax.while_loop is _patched_while:
                     jax.lax.while_loop = (
-                        _session_while if _session_while is not None else _original_while
+                        _session_while
+                        if _session_while is not None
+                        else _original_while
                     )
                 elif not _clobber_while_warned:
                     _clobber_while_warned = True

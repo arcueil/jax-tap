@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -173,7 +173,11 @@ def main() -> None:
         N = 10_000
         K = 7
 
-    print(f"jax {jax.__version__} | device: {jax.devices()[0]}", file=sys.stderr, flush=True)
+    print(
+        f"jax {jax.__version__} | device: {jax.devices()[0]}",
+        file=sys.stderr,
+        flush=True,
+    )
     print(
         f"progress_bar | smoke={args.smoke} | N={N:,} | K={K} | DIM={DIM} | L_STEPS={L_STEPS}",
         file=sys.stderr,
@@ -187,7 +191,9 @@ def main() -> None:
     fn, init = arm_bare(N)
     bare_med, bare_min = warmup_and_time(fn, init, N, K)
     rows.append(dict(arm="bare", se="-", lanes=1, med=bare_med, mn=bare_min))
-    print(f"  bare: {bare_med:.3f} µs/step (BODY BASELINE)", file=sys.stderr, flush=True)
+    print(
+        f"  bare: {bare_med:.3f} µs/step (BODY BASELINE)", file=sys.stderr, flush=True
+    )
 
     # --- manual-progress ---
     print("  manual-progress ...", file=sys.stderr, flush=True)
@@ -211,7 +217,9 @@ def main() -> None:
 
     # --- jaxtap carry (full payload) ---
     for se in [10, 100]:
-        print(f"  jaxtap-se{se} (full carry, outer-only) ...", file=sys.stderr, flush=True)
+        print(
+            f"  jaxtap-se{se} (full carry, outer-only) ...", file=sys.stderr, flush=True
+        )
         fn, init = arm_jaxtap_carry(N, sample_every=se)
         med, mn = warmup_and_time(fn, init, N, K)
         rows.append(dict(arm=f"jaxtap-se{se}", se=se, lanes=1, med=med, mn=mn))
@@ -224,7 +232,9 @@ def main() -> None:
     # --- jaxtap progress idiom (empty payload) ---
     for se in [10, 100]:
         print(
-            f"  jaxtap-se{se}-progress (empty payload, outer-only) ...", file=sys.stderr, flush=True
+            f"  jaxtap-se{se}-progress (empty payload, outer-only) ...",
+            file=sys.stderr,
+            flush=True,
         )
         fn, init = arm_jaxtap_progress(N, sample_every=se)
         med, mn = warmup_and_time(fn, init, N, K)

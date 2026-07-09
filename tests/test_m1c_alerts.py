@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -100,7 +100,9 @@ def test_total_prim_tap_in_scan():
         return _chol_scan_n(x, N)
 
     events: list[tap.TapEvent] = []
-    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(x0)
+    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(
+        x0
+    )
     jax.block_until_ready(got)
 
     chol_events = [e for e in events if "cholesky" in e.path]
@@ -119,7 +121,9 @@ def test_total_prim_tap_outside_loop():
 
     x = jnp.float32(1.0)
     events: list[tap.TapEvent] = []
-    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(x)
+    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(
+        x
+    )
     jax.block_until_ready(got)
 
     chol_events = [e for e in events if "cholesky" in e.path]
@@ -146,7 +150,9 @@ def test_total_prim_tap_while_body():
 
     x = jnp.float32(0.0)
     events: list[tap.TapEvent] = []
-    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(x)
+    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.on("cholesky")])(
+        x
+    )
     jax.block_until_ready(got)
 
     chol_events = [e for e in events if "cholesky" in e.path]
@@ -202,7 +208,9 @@ def test_alert_fires_terse_line(capsys):
         step_part, total_part = parts[3].rstrip(":").split("/")
         assert step_part.lstrip("-").isdigit(), f"step not an int in {ln!r}"
         # total is an int (scan) or '?' (while/outside)
-        assert total_part.isdigit() or total_part == "?", f"total not int or '?': {ln!r}"
+        assert total_part.isdigit() or total_part == "?", (
+            f"total not int or '?': {ln!r}"
+        )
         assert parts[4] == "NaN/Inf", f"label wrong: {ln!r}"
 
 
@@ -225,7 +233,9 @@ def test_alert_silent_when_finite(capsys):
     jax.block_until_ready(got)
 
     captured = capsys.readouterr()
-    alert_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")]
+    alert_lines = [
+        ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")
+    ]
     assert len(alert_lines) == 0, (
         f"expected 0 alert lines for always-False predicate; got: {captured.err!r}"
     )
@@ -259,10 +269,14 @@ def test_alert_independent_of_on_step(capsys):
 
     chol_events = [e for e in events if "cholesky" in e.path]
     # on_step receives ALL N cholesky events
-    assert len(chol_events) == N, f"on_step should receive all {N} events, got {len(chol_events)}"
+    assert len(chol_events) == N, (
+        f"on_step should receive all {N} events, got {len(chol_events)}"
+    )
 
     captured = capsys.readouterr()
-    alert_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")]
+    alert_lines = [
+        ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")
+    ]
     # alert fires only for non-finite ones (f32 breaks at step ~7)
     non_finite_count = sum(1 for e in chol_events if not bool(e.value))
     assert len(alert_lines) == non_finite_count, (
@@ -338,7 +352,9 @@ def test_alert_while_loop_question_mark(capsys):
     jax.block_until_ready(got)
 
     captured = capsys.readouterr()
-    alert_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")]
+    alert_lines = [
+        ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")
+    ]
     assert len(alert_lines) > 0, "expected at least one alert line"
     for ln in alert_lines:
         # While loop total should appear as '?'
@@ -361,7 +377,9 @@ def test_watch_nan_catches_nan_in_f32(capsys):
         return _chol_scan_n(x, N)
 
     events: list[tap.TapEvent] = []
-    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=[tap.watch_nan("cholesky")])(x0)
+    got = tap.verbose(
+        f, on_step=lambda e: events.append(e), taps=[tap.watch_nan("cholesky")]
+    )(x0)
     jax.block_until_ready(got)
 
     chol_events = [e for e in events if "cholesky" in e.path]
@@ -372,10 +390,14 @@ def test_watch_nan_catches_nan_in_f32(capsys):
     assert first_bad is not None, "f32 cholesky should go NaN"
 
     captured = capsys.readouterr()
-    alert_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")]
+    alert_lines = [
+        ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")
+    ]
     assert len(alert_lines) > 0, "watch_nan should emit at least one alert line"
     # Label should be 'NaN/Inf'
-    assert "NaN/Inf" in alert_lines[0], f"expected 'NaN/Inf' label in {alert_lines[0]!r}"
+    assert "NaN/Inf" in alert_lines[0], (
+        f"expected 'NaN/Inf' label in {alert_lines[0]!r}"
+    )
     # total should be the scan length
     step_total = alert_lines[0].split()[3]  # "7/25:"
     assert step_total.endswith(f"/{N}:") or step_total == f"{first_bad}/{N}:", (
@@ -396,7 +418,9 @@ def test_watch_nan_silent_when_finite(capsys):
     jax.block_until_ready(None)
 
     captured = capsys.readouterr()
-    alert_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")]
+    alert_lines = [
+        ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")
+    ]
     assert len(alert_lines) == 0, f"f64 should produce no alerts; got: {captured.err!r}"
 
     # Reset to f32 for other tests
@@ -424,7 +448,9 @@ def test_watch_nan_with_form(capsys):
     assert first_bad is not None, "f32 cholesky should have non-finite events"
 
     captured = capsys.readouterr()
-    alert_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")]
+    alert_lines = [
+        ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")
+    ]
     assert len(alert_lines) > 0, "watch_nan with-form should emit alert lines"
 
 
@@ -445,7 +471,9 @@ def test_primitives_scan_and_cholesky():
     assert isinstance(result, dict)
     assert "scan" in result, f"'scan' not found in {sorted(result)}"
     assert "cholesky" in result, f"'cholesky' not found in {sorted(result)}"
-    assert result["cholesky"] >= 1, f"cholesky count should be >= 1, got {result['cholesky']}"
+    assert result["cholesky"] >= 1, (
+        f"cholesky count should be >= 1, got {result['cholesky']}"
+    )
 
 
 def test_primitives_nested_and_cond():
@@ -489,4 +517,6 @@ def test_primitives_returns_dict_of_ints():
     assert isinstance(result, dict)
     for k, v in result.items():
         assert isinstance(k, str), f"key {k!r} is not a str"
-        assert isinstance(v, int) and v > 0, f"count for {k!r} is {v!r}, expected positive int"
+        assert isinstance(v, int) and v > 0, (
+            f"count for {k!r} is {v!r}, expected positive int"
+        )

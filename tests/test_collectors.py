@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -191,7 +191,9 @@ def test_where_addressing_stable():
     # Filter to while[1] only; scan[0] is skipped but counter still advances
     _, filtered_events = _collect(_mixed_cf, carry0, where=lambda p: p == "while[1]")
     filtered_paths = {e.path for e in filtered_events}
-    assert "while[1]" in filtered_paths, "while[1] must still be addressable when scan[0] filtered"
+    assert "while[1]" in filtered_paths, (
+        "while[1] must still be addressable when scan[0] filtered"
+    )
     assert "scan[0]" not in filtered_paths
 
 
@@ -437,7 +439,9 @@ def test_jsonl_roundtrip_values_match():
             assert live.path == disk.path
             assert live.step == disk.step
             # Values: live has JAX scalar, disk has numpy scalar
-            assert np.isclose(float(np.asarray(live.value)), float(np.asarray(disk.value)))
+            assert np.isclose(
+                float(np.asarray(live.value)), float(np.asarray(disk.value))
+            )
     finally:
         fpath.unlink(missing_ok=True)
 

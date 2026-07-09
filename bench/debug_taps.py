@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -204,7 +204,11 @@ def main() -> None:
         N = 10_000
         K = 7
 
-    print(f"jax {jax.__version__} | device: {jax.devices()[0]}", file=sys.stderr, flush=True)
+    print(
+        f"jax {jax.__version__} | device: {jax.devices()[0]}",
+        file=sys.stderr,
+        flush=True,
+    )
     print(
         f"debug_taps | smoke={args.smoke} | N={N:,} | K={K} | DIM={DIM} | L_STEPS={L_STEPS}",
         file=sys.stderr,
@@ -218,7 +222,9 @@ def main() -> None:
     fn, init = arm_bare(N)
     bare_med, bare_min = warmup_and_time(fn, init, N, K)
     rows.append(dict(arm="bare", se="-", lanes=1, med=bare_med, mn=bare_min))
-    print(f"  bare: {bare_med:.3f} µs/step (BODY BASELINE)", file=sys.stderr, flush=True)
+    print(
+        f"  bare: {bare_med:.3f} µs/step (BODY BASELINE)", file=sys.stderr, flush=True
+    )
 
     # --- debug-carry-se1 ---
     print("  debug-carry-se1 ...", file=sys.stderr, flush=True)
@@ -239,10 +245,16 @@ def main() -> None:
         return lax.scan(leapfrog_body_simple, state, None, length=N)[0]
 
     bare_simple_fn = jax.jit(bare_simple_f)
-    bare_simple_med, bare_simple_min = warmup_and_time(bare_simple_fn, make_init(1), N, K)
+    bare_simple_med, bare_simple_min = warmup_and_time(
+        bare_simple_fn, make_init(1), N, K
+    )
     rows.append(
         dict(
-            arm="bare-simple (L_STEPS=1)", se="-", lanes=1, med=bare_simple_med, mn=bare_simple_min
+            arm="bare-simple (L_STEPS=1)",
+            se="-",
+            lanes=1,
+            med=bare_simple_med,
+            mn=bare_simple_min,
         )
     )
     print(
@@ -265,7 +277,11 @@ def main() -> None:
     fn_bare8, init8 = arm_bare(N, lanes=8)
     bare8_med, bare8_min = warmup_and_time(fn_bare8, init8, N, K)
     rows.append(dict(arm="bare-l8", se="-", lanes=8, med=bare8_med, mn=bare8_min))
-    print(f"  bare-l8: {bare8_med:.3f} µs/step (vmap bare baseline)", file=sys.stderr, flush=True)
+    print(
+        f"  bare-l8: {bare8_med:.3f} µs/step (vmap bare baseline)",
+        file=sys.stderr,
+        flush=True,
+    )
 
     fn, init = arm_vmap_se10(N, lanes=8)
     med, mn = warmup_and_time(fn, init, N, K)
@@ -283,7 +299,13 @@ def main() -> None:
     fn, init = arm_nested_outer_only(N)
     nested_outer_med, nested_outer_min = warmup_and_time(fn, init, N, K)
     rows.append(
-        dict(arm="nested-outer-only", se=10, lanes=1, med=nested_outer_med, mn=nested_outer_min)
+        dict(
+            arm="nested-outer-only",
+            se=10,
+            lanes=1,
+            med=nested_outer_med,
+            mn=nested_outer_min,
+        )
     )
     print(
         f"  nested-outer-only: {nested_outer_med:.3f} µs/step  (+{nested_outer_med - bare_med:.2f} µs)",
@@ -295,7 +317,13 @@ def main() -> None:
     fn, init = arm_nested_both_levels(N)
     nested_both_med, nested_both_min = warmup_and_time(fn, init, N, K)
     rows.append(
-        dict(arm="nested-both-levels", se=10, lanes=1, med=nested_both_med, mn=nested_both_min)
+        dict(
+            arm="nested-both-levels",
+            se=10,
+            lanes=1,
+            med=nested_both_med,
+            mn=nested_both_min,
+        )
     )
     print(
         f"  nested-both-levels: {nested_both_med:.3f} µs/step  (+{nested_both_med - bare_med:.2f} µs)",

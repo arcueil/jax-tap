@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -285,7 +285,9 @@ def print_tables(rows: list[dict], compile_rows: list[tuple], smoke: bool) -> No
     print(f"## Steady-state timing (median + min wall/step in µs){smoke_tag}")
     print()
     print("Overhead columns = arm median minus baseline at same (N, lanes).")
-    print("`vs manual` isolates jaxtap machinery above the irreducible host-callback floor.")
+    print(
+        "`vs manual` isolates jaxtap machinery above the irreducible host-callback floor."
+    )
     print()
     hdr = (
         "| arm | N | se | lanes"
@@ -373,8 +375,16 @@ def main() -> None:
         N_COMPILE = 10_000
         VMAP_N = 10_000
 
-    print(f"jax {jax.__version__} | device: {jax.devices()[0]}", file=sys.stderr, flush=True)
-    print(f"smoke={args.smoke} | K={K} | DIM={DIM} | SEED={SEED}", file=sys.stderr, flush=True)
+    print(
+        f"jax {jax.__version__} | device: {jax.devices()[0]}",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        f"smoke={args.smoke} | K={K} | DIM={DIM} | SEED={SEED}",
+        file=sys.stderr,
+        flush=True,
+    )
 
     rows: list[dict] = []
     compile_rows: list[tuple] = []
@@ -422,7 +432,9 @@ def main() -> None:
         if N == N_COMPILE:
             fn, init = arm_manual_payload(N)
             mp_med, mp_min = warmup_and_time(fn, init, N, K)
-            rows.append(dict(arm="manual-payload", N=N, se="-", lanes=1, med=mp_med, mn=mp_min))
+            rows.append(
+                dict(arm="manual-payload", N=N, se="-", lanes=1, med=mp_med, mn=mp_min)
+            )
             print(f"  manual-payload:{mp_med:.3f} µs/step", file=sys.stderr, flush=True)
 
         # verbose (lanes=1, varying se)
@@ -430,20 +442,28 @@ def main() -> None:
             fn, init = arm_verbose(N, sample_every=se)
             med, mn = warmup_and_time(fn, init, N, K)
             rows.append(dict(arm="verbose", N=N, se=se, lanes=1, med=med, mn=mn))
-            print(f"  verbose(se={se:>3}): {med:.3f} µs/step", file=sys.stderr, flush=True)
+            print(
+                f"  verbose(se={se:>3}): {med:.3f} µs/step", file=sys.stderr, flush=True
+            )
 
         # record-A (lanes=1, varying se)
         for se in SE_VALUES:
             med, mn = arm_record_aform(N, sample_every=se, K=K)
             rows.append(dict(arm="record-A", N=N, se=se, lanes=1, med=med, mn=mn))
-            print(f"  record-A(se={se:>3}): {med:.3f} µs/step", file=sys.stderr, flush=True)
+            print(
+                f"  record-A(se={se:>3}): {med:.3f} µs/step",
+                file=sys.stderr,
+                flush=True,
+            )
 
         # primtap (lanes=1, varying se)
         for se in SE_VALUES:
             fn, init = arm_primtap(N, sample_every=se)
             med, mn = warmup_and_time(fn, init, N, K)
             rows.append(dict(arm="primtap", N=N, se=se, lanes=1, med=med, mn=mn))
-            print(f"  primtap(se={se:>3}): {med:.3f} µs/step", file=sys.stderr, flush=True)
+            print(
+                f"  primtap(se={se:>3}): {med:.3f} µs/step", file=sys.stderr, flush=True
+            )
 
         # vmap lanes=8 (only at VMAP_N to cap wall time)
         if N == VMAP_N:
@@ -453,17 +473,23 @@ def main() -> None:
             fn, init = arm_bare(N, lanes=lanes)
             med, mn = warmup_and_time(fn, init, N, K)
             rows.append(dict(arm="bare", N=N, se="-", lanes=lanes, med=med, mn=mn))
-            print(f"  bare(l={lanes}):    {med:.3f} µs/step", file=sys.stderr, flush=True)
+            print(
+                f"  bare(l={lanes}):    {med:.3f} µs/step", file=sys.stderr, flush=True
+            )
 
             fn, init = arm_manual(N, lanes=lanes)
             med, mn = warmup_and_time(fn, init, N, K)
             rows.append(dict(arm="manual", N=N, se="-", lanes=lanes, med=med, mn=mn))
-            print(f"  manual(l={lanes}):  {med:.3f} µs/step", file=sys.stderr, flush=True)
+            print(
+                f"  manual(l={lanes}):  {med:.3f} µs/step", file=sys.stderr, flush=True
+            )
 
             for se in SE_VALUES:
                 fn, init = arm_verbose(N, sample_every=se, lanes=lanes)
                 med, mn = warmup_and_time(fn, init, N, K)
-                rows.append(dict(arm="verbose", N=N, se=se, lanes=lanes, med=med, mn=mn))
+                rows.append(
+                    dict(arm="verbose", N=N, se=se, lanes=lanes, med=med, mn=mn)
+                )
                 print(
                     f"  verbose(se={se:>3},l={lanes}): {med:.3f} µs/step",
                     file=sys.stderr,

@@ -1,10 +1,10 @@
-# Copyright 2026 The jax-tap Authors.
+# Copyright 2026- The jax-tap Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -84,7 +84,9 @@ def test_output_k_delivers_single_array_not_tuple():
     assert len(prim_events) == _EIGH_N
     for e in prim_events:
         # Without output=k, value would be a tuple; with it, a single array.
-        assert not isinstance(e.value, tuple), f"expected array not tuple, got {type(e.value)}"
+        assert not isinstance(e.value, tuple), (
+            f"expected array not tuple, got {type(e.value)}"
+        )
         assert hasattr(e.value, "shape"), f"expected array-like, got {type(e.value)}"
         # output=0 of eigh is one of the two 2×2 or (2,) outputs (whichever JAX puts first)
         assert len(np.asarray(e.value).shape) >= 1, "expected at least 1-d"
@@ -109,7 +111,9 @@ def test_output_k_with_select_receives_single_array():
     assert len(prim_events) == _EIGH_N
     for e in prim_events:
         # sum of any 1-d or 2-d array is a scalar
-        assert np.asarray(e.value).shape == (), f"expected scalar, got {np.asarray(e.value).shape}"
+        assert np.asarray(e.value).shape == (), (
+            f"expected scalar, got {np.asarray(e.value).shape}"
+        )
 
 
 def test_output_k_out_of_range_raises_index_error():
@@ -360,7 +364,9 @@ def test_watch_nan_and_print_compose(capsys):
 
     # tap.print lines (no FAIL) — should have 4 lines (one per step)
     tap_lines = [
-        line for line in captured.err.splitlines() if "[tap]" in line and "FAIL" not in line
+        line
+        for line in captured.err.splitlines()
+        if "[tap]" in line and "FAIL" not in line
     ]
     assert len(tap_lines) == 4, f"expected 4 tap.print lines, got {len(tap_lines)}"
 
