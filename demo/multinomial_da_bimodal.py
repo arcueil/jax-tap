@@ -102,14 +102,10 @@ def main() -> None:
     mid_frac = sum(counts[1:-1]) / len(acc)
     bimodal = lo_frac > 0.1 and hi_frac > 0.5 and mid_frac < 0.02
     mean_near = abs(mean_acc - TARGET) < 0.25
-    print(
-        f"\nRESULT: bimodality visible on sight from the tapped stream "
-        f"[{'PASS' if bimodal else 'FAIL'}]"
-    )
-    print(
-        f"        while the mean looked plausible ({mean_acc:.2f}) and eps swung {swing:.1f}x "
-        f"[{'PASS' if mean_near and swing > 1.5 else 'FAIL'}]"
-    )
+    print(f"\nRESULT: bimodality visible on sight from the tapped stream "
+          f"[{'PASS' if bimodal else 'FAIL'}]")
+    print(f"        while the mean looked plausible ({mean_acc:.2f}) and eps swung {swing:.1f}x "
+          f"[{'PASS' if mean_near and swing > 1.5 else 'FAIL'}]")
 
 
 if __name__ == "__main__":

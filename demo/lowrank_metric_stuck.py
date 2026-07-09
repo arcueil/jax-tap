@@ -70,9 +70,10 @@ def eig_range(leaves):
 
 
 def main() -> None:
-    draws = jax.random.multivariate_normal(jax.random.key(0), jnp.zeros(DIM), SIGMA, (N_STEPS,))
+    draws = jax.random.multivariate_normal(
+        jax.random.key(0), jnp.zeros(DIM), SIGMA, (N_STEPS,))
 
-    m_buggy = make_warmup(buggy=True)(draws)  # without tap: "succeeds",
+    m_buggy = make_warmup(buggy=True)(draws)   # without tap: "succeeds",
     m_fixed = make_warmup(buggy=False)(draws)  # nothing looks wrong
 
     with tap.record(select=eig_range, sample_every=EVERY) as rec:
@@ -81,24 +82,18 @@ def main() -> None:
     print("metric eig-range while adapting (true spread: 100x):")
     for e in sorted((e for e in rec.events if e.path == "scan[0]"), key=lambda e: e.step):
         if e.step:
-            print(
-                f"  step {e.step:>4}: [{float(e.value['lo']):.2f}, "
-                f"{float(e.value['hi']):.2f}]  ratio ~"
-                f"{float(e.value['hi'] / e.value['lo']):.1f}x"
-            )
+            print(f"  step {e.step:>4}: [{float(e.value['lo']):.2f}, "
+                  f"{float(e.value['hi']):.2f}]  ratio ~"
+                  f"{float(e.value['hi'] / e.value['lo']):.1f}x")
     print("  -> flat at ~1x from the first window: it is learning NOTHING.")
 
     be = jnp.sort(jnp.real(jnp.linalg.eigvals(m_buggy)))
     fe = jnp.linalg.eigvalsh(m_fixed)
     rb, rf = float(be[-1] / be[0]), float(fe[-1] / fe[0])
-    print(
-        f"\nfinal: buggy ratio {rb:.1f}x (identity-shaped) | "
-        f"fixed ratio {rf:.1f}x (learned the target)"
-    )
-    print(
-        f"\nRESULT: 'adaptation learned nothing' visible in one run "
-        f"[{'PASS' if rb < 5.0 and rf > 25.0 else 'FAIL'}]"
-    )
+    print(f"\nfinal: buggy ratio {rb:.1f}x (identity-shaped) | "
+          f"fixed ratio {rf:.1f}x (learned the target)")
+    print(f"\nRESULT: 'adaptation learned nothing' visible in one run "
+          f"[{'PASS' if rb < 5.0 and rf > 25.0 else 'FAIL'}]")
 
 
 if __name__ == "__main__":

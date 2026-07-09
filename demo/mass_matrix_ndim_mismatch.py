@@ -89,8 +89,8 @@ def main() -> None:
     x0 = jnp.zeros(DIM)
 
     # inverse mass matrix convention: M^{-1} ~ target covariance SIGMA
-    dense_imm = SIGMA  # what the user CONFIGURED (2-D)
-    buggy_imm = jnp.diag(SIGMA)  # <-- BUG LIVES HERE: the plumbing
+    dense_imm = SIGMA                    # what the user CONFIGURED (2-D)
+    buggy_imm = jnp.diag(SIGMA)          # <-- BUG LIVES HERE: the plumbing
     #   returns the DIAGONAL (1-D) of the matrix; downstream dispatch-on-ndim
     #   silently switches to the diagonal algorithm.
 
@@ -98,20 +98,16 @@ def main() -> None:
     xs_buggy = make_sampler(buggy_imm)(x0, keys)
     xs_dense = make_sampler(dense_imm)(x0, keys)
     ac_buggy, ac_dense = lag1_autocorr(xs_buggy), lag1_autocorr(xs_dense)
-    print(
-        f"without jax-tap: both runs 'work'. lag-1 autocorr: "
-        f"configured-dense-but-buggy {ac_buggy:.3f} vs true-dense {ac_dense:.3f}"
-    )
+    print(f"without jax-tap: both runs 'work'. lag-1 autocorr: "
+          f"configured-dense-but-buggy {ac_buggy:.3f} vs true-dense {ac_dense:.3f}")
     print("  -> a quiet mixing degradation; nothing raised, nothing NaN.")
 
     # ---------------- with jax-tap: read the primitive fingerprint ----------------
     prims_buggy = tap.primitives(make_sampler(buggy_imm), x0, keys)
     prims_dense = tap.primitives(make_sampler(dense_imm), x0, keys)
     print("\ntap.primitives (trace-time, zero runtime cost):")
-    print(
-        f"  buggy:  dot_general={prims_buggy.get('dot_general', 0)}  "
-        f"(dense algebra ABSENT — your dense config is not running dense!)"
-    )
+    print(f"  buggy:  dot_general={prims_buggy.get('dot_general', 0)}  "
+          f"(dense algebra ABSENT — your dense config is not running dense!)")
     print(f"  fixed:  dot_general={prims_dense.get('dot_general', 0)}  (dense algebra present)")
 
     # Runtime confirmation: tap the DISTINCTIVE primitive (dot_general -- the
@@ -128,13 +124,10 @@ def main() -> None:
 
     caught = prims_buggy.get("dot_general", 0) == 0 and prims_dense.get("dot_general", 0) > 0
     degraded = ac_buggy > ac_dense
-    print(
-        f"\nRESULT: ndim mismatch caught from the primitive fingerprint "
-        f"[{'PASS' if caught else 'FAIL'}]"
-    )
-    print(
-        f"        the silent symptom is real (mixing degraded) [{'PASS' if degraded else 'FAIL'}]"
-    )
+    print(f"\nRESULT: ndim mismatch caught from the primitive fingerprint "
+          f"[{'PASS' if caught else 'FAIL'}]")
+    print(f"        the silent symptom is real (mixing degraded) "
+          f"[{'PASS' if degraded else 'FAIL'}]")
 
 
 if __name__ == "__main__":

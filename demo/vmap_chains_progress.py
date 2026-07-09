@@ -85,25 +85,17 @@ def main() -> None:
     n_tel_events = len([e for e in rec.events if e.path == "scan[0]"])
     finals = [round(float(e.value), 2) for e in rec.events][-N_CHAINS:]
 
-    print(
-        f"face 1 (select=()): {n_bar_events} events for {N_CHAINS} chains x "
-        f"{N_STEPS // EVERY} sampled steps -> ONE bar, lane-independent"
-    )
-    print(
-        f"face 2 (select=carry): {n_tel_events} events "
-        f"(= {N_CHAINS} chains x {N_STEPS // EVERY}) -> per-chain values,"
-    )
+    print(f"face 1 (select=()): {n_bar_events} events for {N_CHAINS} chains x "
+          f"{N_STEPS // EVERY} sampled steps -> ONE bar, lane-independent")
+    print(f"face 2 (select=carry): {n_tel_events} events "
+          f"(= {N_CHAINS} chains x {N_STEPS // EVERY}) -> per-chain values,")
     print(f"  e.g. last sampled window per chain: {finals}")
 
-    ok = (
-        n_bar_events == N_STEPS // EVERY
-        and n_tel_events == N_CHAINS * (N_STEPS // EVERY)
-        and out.shape == (N_CHAINS,)
-    )
-    print(
-        f"\nRESULT: vmap duality — one bar (unbatched) AND per-chain telemetry "
-        f"(batched) from the same unmodified sampler [{'PASS' if ok else 'FAIL'}]"
-    )
+    ok = (n_bar_events == N_STEPS // EVERY
+          and n_tel_events == N_CHAINS * (N_STEPS // EVERY)
+          and out.shape == (N_CHAINS,))
+    print(f"\nRESULT: vmap duality — one bar (unbatched) AND per-chain telemetry "
+          f"(batched) from the same unmodified sampler [{'PASS' if ok else 'FAIL'}]")
 
 
 if __name__ == "__main__":

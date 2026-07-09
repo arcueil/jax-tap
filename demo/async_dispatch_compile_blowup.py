@@ -109,7 +109,9 @@ def main() -> None:
     print(f"     (validated: the actual second run measures {steady_exec:.2f}s)")
 
     ok = (abs(exec_part - steady_exec) / steady_exec < 0.5) and hidden > 0.3
-    print(f"\nRESULT: tap arrival time splits compile vs execution [{'PASS' if ok else 'FAIL'}]")
+    print(
+        f"\nRESULT: tap arrival time splits compile vs execution " f"[{'PASS' if ok else 'FAIL'}]"
+    )
 
 
 if __name__ == "__main__":

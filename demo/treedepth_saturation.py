@@ -72,10 +72,8 @@ def main() -> None:
 
     # ---------------- without jax-tap: looks fine ----------------
     xs = run(jnp.float32(0.0), keys)
-    print(
-        f"without jax-tap: {N_DRAWS} draws completed, mean |x| = "
-        f"{float(jnp.abs(xs).mean()):.2f}, no warnings anywhere."
-    )
+    print(f"without jax-tap: {N_DRAWS} draws completed, mean |x| = "
+          f"{float(jnp.abs(xs).mean()):.2f}, no warnings anywhere.")
 
     # ---------------- with jax-tap: live tripwire + post-hoc fraction ----------------
     # How the tap works, end to end (the backend in 5 steps):
@@ -101,9 +99,8 @@ def main() -> None:
             tripped.append(e.step)
             #  e.path  = the loop's address ("scan[0]"); e.total = scan length.
             #  stderr + the "[tap] FAIL" prefix mirror the built-in alerts.
-            sys.stderr.write(
-                f"[tap] FAIL {e.path} {e.step}/{e.total}: treedepth=={MAX_TREEDEPTH} (saturated)\n"
-            )
+            sys.stderr.write(f"[tap] FAIL {e.path} {e.step}/{e.total}: "
+                             f"treedepth=={MAX_TREEDEPTH} (saturated)\n")
 
     with tap.record(select=lambda leaves: leaves[1], on_step=tripwire) as rec:
         run(jnp.float32(0.0), keys)  # unmodified — delete `with` after debugging
@@ -118,18 +115,14 @@ def main() -> None:
         cur = cur + 1 if s else 0
         runs = max(runs, cur)
 
-    print(
-        f"\nwith jax-tap: first saturation announced live at draw {tripped[0] if tripped else '—'}"
-    )
+    print(f"\nwith jax-tap: first saturation announced live at draw {tripped[0] if tripped else '—'}")
     print(f"  mean depth {mean_depth:.1f} (innocuous) — but {frac:.0%} of draws SATURATED,")
     print(f"  including a {runs}-draw consecutive stretch (an excursion the sampler")
     print("  could not explore at the depth it needed).")
 
     ok = tripped and 0.03 < frac < 0.6 and mean_depth < MAX_TREEDEPTH - 1 and runs >= 10
-    print(
-        f"\nRESULT: per-draw tripwire + saturation fraction from one tapped stream "
-        f"[{'PASS' if ok else 'FAIL'}]"
-    )
+    print(f"\nRESULT: per-draw tripwire + saturation fraction from one tapped stream "
+          f"[{'PASS' if ok else 'FAIL'}]")
 
 
 if __name__ == "__main__":
