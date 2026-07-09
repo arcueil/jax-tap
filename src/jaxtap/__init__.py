@@ -116,6 +116,27 @@ class PrimitiveTap:
         receive every event.
     label:
         Short string used in the alert line.  Default: the primitive name.
+    output:
+        Select a single primitive output by index before passing to ``select``
+        (or before delivering the value when ``select`` is ``None``).
+        ``None`` (default) passes the full output tuple.  Out-of-range indices
+        raise ``IndexError`` at trace time.
+
+        .. warning:: **Primitive output order ≠ Python API order.**
+            The ``output=k`` index refers to the JAX *primitive's* output list,
+            not the Python-level return tuple of the high-level function.  These
+            can differ.  For example, ``jnp.linalg.eigh`` returns
+            ``(eigenvalues, eigenvectors)`` in Python, but the underlying
+            ``eigh`` primitive emits ``(eigenvectors, eigenvalues)`` — so
+            ``output=0`` gives eigenvectors, not eigenvalues.  Use
+            ``tap.print(prim_name)`` (no ``output=``) first to inspect the
+            actual output layout before relying on a specific index.
+    once:
+        When ``True``, the alert / print fires at most once per :func:`verbose`
+        call (B-form) or per trace (A-form).  Subsequent truthy events from the
+        same spec instance are silently dropped.  Default: ``False`` (every
+        truthy event fires).  Useful to suppress repetitive alert lines when only
+        the *first* occurrence matters.
 
     Scope
     -----
@@ -138,6 +159,7 @@ class PrimitiveTap:
     alert: "Callable | None" = None
     label: "str | None" = None
     output: "int | None" = None
+    once: bool = False
     # _printer: set by tap.print() — uses value format instead of FAIL label format.
     _printer: bool = dataclasses.field(default=False, repr=False)
 
@@ -148,6 +170,7 @@ def on(
     alert: "Callable | None" = None,
     label: "str | None" = None,
     output: "int | None" = None,
+    once: bool = False,
 ) -> PrimitiveTap:
     """Create a :class:`PrimitiveTap` spec.
 
@@ -170,11 +193,20 @@ def on(
         ``None`` (default) passes the full output tuple.  Out-of-range indices
         raise ``IndexError`` at trace time.
 
+        Note: indices refer to the JAX *primitive's* output order, which can
+        differ from the Python API's return order.  Use ``tap.print(prim_name)``
+        first to inspect the actual layout before relying on a specific index.
+    once:
+        When ``True``, the alert fires at most once per :func:`verbose` call.
+        Default: ``False``.
+
     Returns
     -------
     PrimitiveTap
     """
-    return PrimitiveTap(prim_name=prim_name, select=select, alert=alert, label=label, output=output)
+    return PrimitiveTap(
+        prim_name=prim_name, select=select, alert=alert, label=label, output=output, once=once
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -205,25 +237,27 @@ def _guard(on_step: Callable[[TapEvent], None], event: TapEvent) -> None:
 
 
 def _format_value(value: Any) -> str:
-    """Compact repr of a host-side value for :func:`tap.print` output.
+    """Compact single-line repr of a host-side value for :func:`tap.print` output.
 
     Uses numpy with ``printoptions(precision=4, threshold=8, edgeitems=2)`` so
-    large arrays truncate rather than flooding stderr with numbers.
+    large arrays truncate rather than flooding stderr.  Internal newlines are
+    collapsed to spaces so the result fits on one physical line.
     """
     import numpy as _np  # lazy — only imported when a tap.print actually fires
 
     try:
         arr = _np.asarray(value)
         with _np.printoptions(precision=4, threshold=8, edgeitems=2):
-            return repr(arr)
+            raw = repr(arr)
+        return " ".join(raw.split())  # collapse internal newlines / extra spaces
     except Exception:  # noqa: BLE001
         try:
-            return repr(value)
+            return " ".join(repr(value).split())
         except Exception:  # noqa: BLE001
             return "<unprintable>"
 
 
-def _fire_alert(spec: PrimitiveTap, event: TapEvent) -> None:
+def _fire_alert(spec: PrimitiveTap, event: TapEvent, _once_fired: "set[int] | None" = None) -> None:
     """Fire ``spec.alert(event.value)`` and write the terse line to stderr if truthy.
 
     Runs inside the ``_guard`` discipline: a raising alert predicate is caught,
@@ -232,6 +266,10 @@ def _fire_alert(spec: PrimitiveTap, event: TapEvent) -> None:
     When ``spec._printer`` is True (set by :func:`print`), the line uses the
     value format ``[tap] {path} {step}/{total}: {value}`` instead of the FAIL
     format ``[tap] FAIL {path} {step}/{total}: {label}``.
+
+    ``_once_fired`` is a per-:func:`verbose`-call set of spec ``id``\\ s that have
+    already emitted at least one line.  When ``spec.once`` is True and the spec's
+    id is already in the set, the call is a no-op (the once budget is spent).
     """
     alert_fn = spec.alert
     assert alert_fn is not None  # caller must check
@@ -251,6 +289,12 @@ def _fire_alert(spec: PrimitiveTap, event: TapEvent) -> None:
                 pass
         return
     if should_alert:
+        # once=True: fire at most once per verbose() call / per trace.
+        spec_id = id(spec)
+        if spec.once and _once_fired is not None:
+            if spec_id in _once_fired:
+                return
+            _once_fired.add(spec_id)
         total_str = str(event.total) if event.total is not None else "?"
         try:
             if spec._printer:
@@ -414,6 +458,11 @@ def verbose(
     # outvals: tuple of the primitive's output arrays (device-side)
     # spec: the matching PrimitiveTap
     # total: Python int or None — enclosing scan length (None for while / outside loop)
+    #
+    # _once_fired tracks which specs have already fired once this verbose() call;
+    # created fresh here so each verbose() invocation has its own independent set.
+    # Scoped here (not module-global) so the once budget resets on each verbose() call.
+    _once_fired: set[int] = set()
     prim_tap_fn: Callable | None = None
     if taps:
 
@@ -439,13 +488,14 @@ def verbose(
             flat_selected = jax.tree_util.tree_leaves(selected)
             sel_tree = jax.tree_util.tree_structure(selected)
             _spec = spec  # capture for host closure
+            _of = _once_fired  # capture per-verbose() set by reference
 
             def _host(step_: Any, *flat_vals: Any) -> None:
                 value = jax.tree_util.tree_unflatten(sel_tree, list(flat_vals))
                 event = TapEvent(path=path, step=int(step_), value=value, total=total)
                 _guard(on_step, event)
                 if _spec.alert is not None:
-                    _fire_alert(_spec, event)
+                    _fire_alert(_spec, event, _of)
 
             jax.debug.callback(_host, step, *flat_selected, ordered=False)
 
@@ -589,7 +639,12 @@ def record(
 # ---------------------------------------------------------------------------
 
 
-def watch_nan(prim_name: str, label: str = "NaN/Inf", output: "int | None" = None) -> PrimitiveTap:
+def watch_nan(
+    prim_name: str,
+    label: str = "NaN/Inf",
+    output: "int | None" = None,
+    once: bool = False,
+) -> PrimitiveTap:
     """Create a :class:`PrimitiveTap` that alerts when any float output is non-finite.
 
     Equivalent to::
@@ -615,6 +670,15 @@ def watch_nan(prim_name: str, label: str = "NaN/Inf", output: "int | None" = Non
         to that one output array (not a tuple) — useful for primitives such as
         ``eigh`` which return multiple outputs and you only care about one.
         ``None`` (default) checks all float outputs in the output tuple.
+
+        Note: indices refer to the JAX *primitive's* output order, which can
+        differ from the Python API's return order.  Use ``tap.print(prim_name)``
+        first to inspect the actual layout before relying on a specific index.
+    once:
+        When ``True``, the alert fires at most once per :func:`verbose` call.
+        Useful when only the first non-finite occurrence matters and you want to
+        suppress the flood of repeated FAIL lines for every subsequent step.
+        Default: ``False``.
 
     Returns
     -------
@@ -649,7 +713,9 @@ def watch_nan(prim_name: str, label: str = "NaN/Inf", output: "int | None" = Non
 
         select_fn = _select_finite_tuple
 
-    return on(prim_name, select=select_fn, alert=lambda ok: not ok, label=label, output=output)
+    return on(
+        prim_name, select=select_fn, alert=lambda ok: not ok, label=label, output=output, once=once
+    )
 
 
 def print(  # noqa: A001 — intentionally shadows builtin; internal code uses sys.stderr.write
@@ -657,16 +723,19 @@ def print(  # noqa: A001 — intentionally shadows builtin; internal code uses s
     output: "int | None" = None,
     select: "Callable | None" = None,
     label: "str | None" = None,
+    once: bool = False,
 ) -> PrimitiveTap:
     """Create a :class:`PrimitiveTap` that always prints the tapped value to stderr.
 
-    Every time the named primitive fires, emits one line to stderr::
+    Every time the named primitive fires, emits one terse line to stderr::
 
         [tap] {path} {step}/{total_or_'?'}: {value}
 
     where ``value`` is formatted with
     ``numpy.printoptions(precision=4, threshold=8, edgeitems=2)`` so large
-    arrays are truncated rather than flooding the terminal.
+    arrays are truncated rather than flooding the terminal.  Internal newlines
+    in the numpy repr are collapsed to spaces so the event always fits on one
+    physical line.
 
     This is the simplest diagnostic tool: add it while debugging, remove it
     when done — no other code changes needed.
@@ -678,12 +747,19 @@ def print(  # noqa: A001 — intentionally shadows builtin; internal code uses s
     output:
         Optional single-output index.  When given, only that output array is
         printed.  ``None`` prints the full output tuple.
+
+        Note: indices refer to the JAX *primitive's* output order, which can
+        differ from the Python API's return order.  Use ``tap.print(prim_name)``
+        without an index first to inspect the actual output layout.
     select:
         Optional on-device reducer applied before printing.  Receives the
         output (single array if ``output=k``, tuple otherwise).
     label:
-        Unused for the print format, but stored on the spec for composition
-        with an additional ``alert``.
+        Stored on the spec for composition with an additional ``alert``;
+        not shown in the print format itself.
+    once:
+        When ``True``, print only on the first fire per :func:`verbose` call.
+        Default: ``False``.
 
     Returns
     -------
@@ -695,7 +771,7 @@ def print(  # noqa: A001 — intentionally shadows builtin; internal code uses s
 
         with tap.record(taps=[tap.print("dot_general")]) as rec:
             result = model(x)
-        # [tap] scan[0]/jit[0]/dot_general[0] 3/25: array([[...]])
+        # [tap] scan[0]/jit[0]/dot_general[0] 3/25: array([[0.1, ...]])
     """
     return PrimitiveTap(
         prim_name=prim_name,
@@ -703,6 +779,7 @@ def print(  # noqa: A001 — intentionally shadows builtin; internal code uses s
         select=select,
         alert=lambda v: True,  # always fire
         label=label,
+        once=once,
         _printer=True,
     )
 

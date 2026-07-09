@@ -78,10 +78,11 @@ def run_demo(x64: bool) -> dict:
     final_log_step = float(run(log_step0))
 
     # ---------------- WITH jax-tap ----------------
-    # tap.watch_nan("cholesky") wires up the primitive tap: it reduces the
-    # cholesky output on-device to a single all-isfinite bool, and emits a
-    # built-in "[tap] FAIL ..." line to stderr LIVE on the first non-finite step.
-    with tap.record(taps=[tap.watch_nan("cholesky")]) as rec:
+    # tap.watch_nan("cholesky", once=True) wires up the primitive tap: it reduces the
+    # cholesky output on-device to a single all-isfinite bool, and emits exactly ONE
+    # "[tap] FAIL ..." line to stderr LIVE on the first non-finite step (once=True
+    # suppresses the repeated FAIL for every subsequent step).
+    with tap.record(taps=[tap.watch_nan("cholesky", once=True)]) as rec:
         run(log_step0)  # <-- UNMODIFIED user code. Delete this `with` block
         #                     and nothing was ever there.
 
