@@ -401,9 +401,11 @@ def _dynamic_router(event: Any) -> None:
         if ctx is None or ctx._recorder is None:
             return
 
-    if _guard_fn is None:
-        # Populate both caches atomically on first call; circular-import-safe.
-        from . import _fire_carry_alert as _fca, _guard as _g  # noqa: PLC0415
+    if _guard_fn is None or _carry_alert_fn is None:
+        # Populate both caches on first call; circular-import-safe.
+        # Condition checks both so mypy can narrow each to Callable below.
+        from . import _fire_carry_alert as _fca  # noqa: PLC0415
+        from . import _guard as _g
 
         _guard_fn = _g
         _carry_alert_fn = _fca
