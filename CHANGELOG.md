@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- **Carry-tap alerts**: `alert=` / `alert_once=` on `tap.verbose` and
+  `tap.record` — host-side tripwires on carry events with the standard terse
+  `[tap] FAIL {path} {step}/{total}: {msg}` line. Zero device-side cost
+  (trace-identical with and without). A-form alerts resolve from the ACTIVE
+  context on jit-cache hits (same live routing as `on_step`). `on_step` is now
+  optional: a bare `tap.verbose(f)` traces no callback at all.
+- **Emission machinery −55%** (18.1 → 8.2 µs/event on the reference CPU):
+  `step_.item()` replaces `int(step_)` in the host path (JAX's
+  `__int__`/`check_scalar_conversion` route costs 6× `.item()`), plus a
+  single-context fast path in the dynamic router. The progress idiom at
+  `sample_every=100` now costs ≈ +0.6 µs/step. Profiling evidence and the
+  rejected-candidates table live in `bench/profiling/`.
+- **vmap×while ghost events eliminated (carry taps)**: lanes that finish early
+  no longer deliver fabricated carry values — per-lane event streams are exact
+  (previously 30 events fired where 16 were real). Active-lane mask is
+  sign-encoded into the step operand (~4–8 µs/iter; `bench/a1_decompose.py`).
+  Ghost drop happens before `alert=`, so tripwires never fire on impossible
+  values. Residual: primitive taps inside vmapped while bodies still fire on
+  ghost iterations; `sample_every` is effectively ungated under vmap×while
+  (JAX broadcasts the joint step, making the gate per-lane — a
+  `vmap`+`lax.cond`+effects limitation).
+- **NumPy-style API docs**: full Parameters/Returns/Examples (executed) for the
+  public surface, including the flat-leaves `select` contract.
+- **Nightly canary hardened**: runs the test suite against JAX nightly with
+  warnings-as-errors AND a machinery-regression bench gate
+  (`bench/nightly_gate.py`, machine-independent machinery/floor ratio ≤ 0.25).
+- **GPU artifact validation**: `tools/gpu_pypi_validate.sh` installs the
+  published wheel from PyPI on a CUDA box and runs suite + demos + bench.
+
 ## 0.1.0 (2026-07-09)
 
 Initial release. Zero-code-change runtime telemetry for JAX control flow.
@@ -30,17 +61,9 @@ Initial release. Zero-code-change runtime telemetry for JAX control flow.
 
 ### Known boundaries (documented)
 
-- **vmap×while_loop carry taps**: ghost events (from finished lanes executing
-  extra joint iterations) are now suppressed — only real per-lane steps reach
-  `on_step` and `alert`. Primitive taps (`taps=[...]`) inside vmapped while
-  bodies still fire for all joint iterations including ghost ones; extending
-  ghost-filtering to primitive taps is future work. The mitigation re-evaluates
-  the cond jaxpr inside each body iteration and encodes the per-lane active mask
-  as a sign bit in the step argument to avoid shipping an extra callback scalar.
-  Measured overhead: ~4–8 µs/iter (run-to-run spread) vs. no-A1 baseline (N=2000, K=25,
-  bench/a1_decompose.py). The dominant cost is the host-side sign decode; for
-  convergence-check conds (e.g. `norm(carry) > tol`) the extra cond XLA eval
-  is the only additional device cost (bench/while_cond_overhead.py).
+- vmap×while_loop emits per-joint-iteration events including masked lanes
+  (inherent to JAX's batched while lowering). [Mitigated for carry taps in
+  0.2.0 — see above.]
 - Taps riding along `grad` observe the forward pass only; tap the
   differentiated function (`tap.verbose(jax.grad(f))`) to observe the
   backward pass.
