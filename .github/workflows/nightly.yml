@@ -43,6 +43,9 @@ jobs:
           PYTHONWARNINGS: "error"
         run: uv run --no-sync pytest -q -W error
 
+      - name: Benchmark gate (machinery regression tripwire)
+        run: uv run --no-sync python bench/nightly_gate.py
+
       - name: File canary issue on failure
         if: failure()
         env:
