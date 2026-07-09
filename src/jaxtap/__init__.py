@@ -610,6 +610,43 @@ def verbose(
         results, that emits a :class:`TapEvent` via ``on_step`` for each
         control-flow iteration and/or matched primitive.
 
+    Examples
+    --------
+    Record all carry-tap events::
+
+        events = []
+        tapped = tap.verbose(f, on_step=lambda e: events.append(e))
+        result = tapped(*args)
+        print(f"Recorded {len(events)} events")
+
+    Alert on every event (prints to stderr)::
+
+        tapped = tap.verbose(f, alert=lambda e: True)
+        result = tapped(*args)
+        # stderr output:
+        # [tap] FAIL scan[0] 0/5: alert
+        # [tap] FAIL scan[0] 1/5: alert
+        # ...
+
+    Alert with custom message when step > 0::
+
+        tapped = tap.verbose(
+            f,
+            alert=lambda e: "step > 0" if e.step > 0 else False
+        )
+        # stderr (on step 1):
+        # [tap] FAIL scan[0] 1/5: step > 0
+
+    Alert once per path (suppresses repeated lines)::
+
+        tapped = tap.verbose(f, alert=lambda e: True, alert_once=True)
+        # Only the first event per path path prints to stderr
+
+    Bare verbose trace with no callback (alert-only)::
+
+        tapped = tap.verbose(f, alert=lambda e: e.step == 0)
+        result = tapped(*args)  # no on_step callback, only alert fires
+
     Notes
     -----
     **Carry boundary & pytree erasure**: Jaxprs are flat — tracing erases the
@@ -867,13 +904,45 @@ def record(
 
     Parameters
     ----------
-    on_step:
+    f : Callable or None
+        Function to instrument (B-form), or ``None`` for A-form (context manager).
+    select : Callable or None, optional
+        Traced-side reducer applied to carry before host boundary crossing
+        (see :func:`verbose`). Default: ``None``.
+    ops : tuple of str, optional
+        Control-flow operators to tap (``"scan"``, ``"while_loop"``).
+        Default: ``("scan", "while_loop")``.
+    sample_every : int, optional
+        Fire taps only on steps 0, k, 2k, … (device-side gate).
+        Default: 1 (every step).
+    where : Callable or None, optional
+        Path predicate; only CF nodes whose path satisfies ``where(path)`` emit
+        carry taps. Default: ``None`` (all nodes emit).
+    max_depth : int or None, optional
+        Depth limit; CF nodes at depth > ``max_depth`` do not emit carry taps.
+        Default: ``None`` (no limit).
+    taps : Sequence of PrimitiveTap, optional
+        Primitive taps (created via :func:`on`) to fire on named primitives.
+        Default: ``()``.
+    alert : Callable or None, optional
+        HOST-side predicate evaluated on each carry-tap :class:`TapEvent`.
+        When truthy, emits one terse line to stderr::
+
+            [tap] FAIL {path} {step}/{total}: {msg}
+
+        where ``msg`` is the returned value when it is a ``str``, otherwise
+        ``"alert"``. Runs inside ``_guard`` discipline (never propagates).
+        Fires BEFORE ``on_step``. Default: ``None``.
+    alert_once : bool, optional
+        When ``True``, alert fires at most once per path per :func:`record`
+        call. Default: ``False``.
+    on_step : Callable or None, optional
         Optional additional host callback.  When given, every :class:`TapEvent`
         is delivered to BOTH the :class:`FlightRecorder` (``rec``) AND
         ``on_step``, in that order, both ``_guard``-wrapped (never-raise).
         For the A-form this callback is dynamically resolved at event-fire time
         (see ``_dynamic_router``), so it respects the same post-exit and
-        cache-hit routing as the recorder itself.
+        cache-hit routing as the recorder itself. Default: ``None``.
 
     A-form notes
     ------------
@@ -995,18 +1064,30 @@ def watch_nan(
 
     Examples
     --------
-    Watch for NaN/Inf in cholesky outputs::
+    Watch for NaN/Inf in primitive outputs inside a scan::
 
-        spec = tap.watch_nan("cholesky")
-        with tap.record(taps=[spec]) as rec:
-            result = jnp.linalg.cholesky(matrix)
-        # Alerts to stderr if any NaN or Inf appears in cholesky output
+        import jax.lax as lax
+
+        spec = tap.watch_nan("add")
+        events = []
+
+        def f(x):
+            def body(carry, _):
+                # Force NaN on step 1
+                return jnp.where(jnp.arange(2) == 1, jnp.nan, carry + 1), None
+            return lax.scan(body, x, jnp.arange(2))[0]
+
+        tapped = tap.verbose(f, taps=[spec])
+        result = tapped(jnp.array([1.0, 2.0]))
+        # stderr output:
+        # [tap] FAIL scan[0]/add[0] 1/2: NaN/Inf
 
     Watch a single output from a multi-output primitive::
 
-        # For eigh which returns (eigenvalues, eigenvectors),
-        # watch only the eigenvalues (output=0 in primitive order)
-        spec = tap.watch_nan("eigh", output=0)
+        # For eigh which returns (eigenvalues, eigenvectors) in Python
+        # but the primitive outputs (eigenvectors, eigenvalues),
+        # watch the eigenvalues (output=1 in primitive order)
+        spec = tap.watch_nan("eigh", output=1)
     """
     if output is not None:
         # Single-array mode: select receives one array, not a tuple.
@@ -1096,19 +1177,26 @@ def print(  # noqa: A001 — intentionally shadows builtin; internal code uses s
 
     Examples
     --------
-    Print primitive outputs for debugging::
+    Print primitive outputs to stderr::
 
-        with tap.record(taps=[tap.print("dot_general")]) as rec:
-            result = model(x)
-        # stderr: [tap] scan[0]/jit[0]/dot_general[0] 3/25: array([[0.1, ...]])
+        spec = tap.print("dot_general")
+        tapped = tap.verbose(lambda x: jnp.dot(x, x), taps=[spec])
+        result = tapped(jnp.array([1.0, 2.0, 3.0]))
+        # stderr output:
+        # [tap] dot_general[0] -1/?: array([14.], dtype=float32)
 
-    Print only the first fire::
+    Print only the first occurrence (``once=True``)::
 
-        spec = tap.print("cholesky", once=True)
-        with tap.record(taps=[spec]) as rec:
-            for _ in range(10):
-                result = jnp.linalg.cholesky(matrix)
-        # stderr prints only on iteration 0, suppressed for iterations 1-9
+        spec = tap.print("add", once=True)
+        def f(x):
+            def body(carry, _):
+                return carry + 1, None
+            return lax.scan(body, x, jnp.arange(3))[0]
+
+        tapped = tap.verbose(f, taps=[spec])
+        result = tapped(0)
+        # stderr (fires only on step 0):
+        # [tap] scan[0]/add[0] 0/3: array(1, dtype=int32)
     """
     return PrimitiveTap(
         prim_name=prim_name,
