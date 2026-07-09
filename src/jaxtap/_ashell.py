@@ -348,6 +348,14 @@ def _select_ctx(active: "list[_RecordContext]") -> "_RecordContext | None":
 # Dynamic router — the singleton on_step baked into every XLA artifact
 # ---------------------------------------------------------------------------
 
+# Cached references to _guard and _fire_carry_alert (from jaxtap.__init__)
+# populated on first call.  Module-level import would create a circular
+# dependency at load time (_ashell ← _walker ← __init__), so we import once
+# and cache here.  Thread-safe: worst case two threads race on init and both
+# set the same value.
+_guard_fn: "Callable | None" = None
+_carry_alert_fn: "Callable | None" = None
+
 
 def _dynamic_router(event: Any) -> None:
     """Route a TapEvent to whichever context is active at CALL TIME.
@@ -366,24 +374,48 @@ def _dynamic_router(event: Any) -> None:
     DIFFERENT ``select`` or ``taps`` config than what was baked at trace time,
     the trace-time device-side select wins for the on-device computation;
     only the host routing is live.
+
+
+    Fast path (n == 1): inlines the single-context lookup to avoid the list
+    allocation and genexpr in ``_active_contexts`` and the function-call
+    overhead of ``_select_ctx``.  The L4 contract (any thread → this context
+    when n == 1) is preserved — same semantics as the slow path.
     """
-    active = _active_contexts()
-    if not active:
+    global _guard_fn, _carry_alert_fn
+
+    n = len(_context_registry)
+    if n == 0:
         return  # no active context → drop (covers post-exit phantom case)
-    ctx = _select_ctx(active)
-    if ctx is None or ctx._recorder is None:
-        return
-    # Lazy import to avoid circular import at module load.
-    from . import _fire_carry_alert, _guard  # noqa: PLC0415
+
+    if n == 1:
+        # Fast path: single active context — any thread is attributed to it (L4).
+        ctx = next(iter(_context_registry.values()))()  # deref the lone weakref
+        if ctx is None or ctx._recorder is None:
+            return
+    else:
+        # Slow path: multiple contexts — need full snapshot + thread-owner selection.
+        active = _active_contexts()
+        if not active:
+            return
+        ctx = _select_ctx(active)
+        if ctx is None or ctx._recorder is None:
+            return
+
+    if _guard_fn is None:
+        # Populate both caches atomically on first call; circular-import-safe.
+        from . import _fire_carry_alert as _fca, _guard as _g  # noqa: PLC0415
+
+        _guard_fn = _g
+        _carry_alert_fn = _fca
 
     # alert fires BEFORE on_step/recorder — matching verbose() ordering.
     # Using the ACTIVE context's alert and once-set means cache hits in a new
     # context correctly fire the new context's alert (not the prior trace's).
     if ctx._alert is not None:
-        _fire_carry_alert(ctx._alert, event, ctx._alert_once, ctx._carry_once_fired)
-    _guard(ctx._recorder, event)
+        _carry_alert_fn(ctx._alert, event, ctx._alert_once, ctx._carry_once_fired)
+    _guard_fn(ctx._recorder, event)
     if ctx._extra_on_step is not None:
-        _guard(ctx._extra_on_step, event)
+        _guard_fn(ctx._extra_on_step, event)
 
 
 # ---------------------------------------------------------------------------
