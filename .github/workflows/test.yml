@@ -16,6 +16,5 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --dev
+      - run: uv run pre-commit run --all-files --show-diff-on-failure
       - run: uv run pytest -q
-      - run: uv run ruff check src/ tests/ bench/
-      - run: uv run ruff format --check src/ tests/ bench/
