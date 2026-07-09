@@ -110,15 +110,20 @@ tap the DISTINCTIVE primitive — generic ones like `mul` match PRNG internals.
 **Caveat:** the *ideal* is a dedicated **trace-time shape tap** (roadmap);
 `tap.primitives()` is the shipped approximation.
 
-### ⚠️ `async_dispatch_compile_blowup.py` — execution hidden as "tracing" *(planned)*
-**Bug pattern:** JAX dispatches asynchronously, so naive wall-clock timing can
-attribute hundreds of seconds of execution to "tracing/compilation" —
-misdirecting an optimization effort. See JAX's
-[async dispatch documentation](https://docs.jax.dev/en/latest/async_dispatch.html).
-**Will show:** the concept of trace-vs-execute event timestamps separating
-real compile time from execution.
-**Caveat:** jax-tap has no **jit-event tap** class yet; this file demonstrates
-the idea and marks the tap class as roadmap.
+### ⚠️ `async_dispatch_compile_blowup.py` — execution hidden as "compilation"
+**Bug pattern:** the first call of a jitted function pays trace + compile +
+execute in one opaque wall-time block; naive profiling attributes it all to
+compilation (and on async backends the conflation smears execution into
+whatever phase blocks — see JAX's
+[async dispatch documentation](https://docs.jax.dev/en/latest/async_dispatch.html)).
+Real episodes hid minutes of execution inside a reported "tracing" number.
+**What it shows:** tap events are emitted by the RUNNING program, so the
+FIRST event's arrival timestamp IS the compile/execute boundary: the demo
+splits an opaque first call into 0.08s compile / 0.33s execution (81% of the
+"compilation" number was execution), cross-checked against the same
+program's steady-state run (0.32s, 3% agreement).
+**Caveat:** the *ideal* is a **jit-event tap** class (trace/compile/execute
+timestamps — roadmap); event-arrival timing is the shipped approximation.
 
 ### 🚧 `backward_pass_vjp_nan.py` — the NaN jax-tap does NOT catch *(planned)*
 **Bug pattern:** a function like `hypot` evaluated at `(0, 0)` has a clean
