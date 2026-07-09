@@ -42,13 +42,19 @@ block and nothing was ever there. Also shows the trap is float32-specific
 **Tap class:** primitive tap (`tap.on("cholesky")`, reduce-on-device to one
 bool) via the A-shell `with` form + live `on_step` streaming.
 
-### ✅ `lowrank_metric_stuck.py` — the metric that never moved *(planned)*
-**Bug (#949, parked 7 weeks):** an un-inverted score covariance left the
-low-rank mass-matrix metric ≈ identity in the Gaussian limit — adaptation looked
-like it ran but learned nothing.
-**Will show:** a carry-tap on the metric's eigenvalues per warmup window makes
-"the metric never moves off identity" visible in a single control run.
-**Tap class:** carry tap on adaptation state.
+### ✅ `lowrank_metric_stuck.py` — the metric that never moved
+**Bug (#949, parked 7 weeks):** an un-inverted score covariance cancelled the
+position covariance (cov(x)·cov(s) ≈ Σ·Σ⁻¹ = I), leaving the learned metric
+identity-shaped — adaptation ran, returned a metric, raised nothing; the
+sampler just mixed badly.
+**What it shows:** the warmup loop has zero logging code; a carry-tap `select`
+derives the evolving metric's eigenvalue range ON-DEVICE from the running
+accumulators (two scalars/window cross to host, `sample_every=500`). The
+eig-ratio sits at ~1× from the FIRST window while the target spans 100× —
+"adaptation LEARNED NOTHING" visible in one run vs seven weeks parked. The
+fixed pipeline's ratio reaches 100×.
+**Tap class:** carry tap on adaptation state (with-form + `select` +
+`sample_every`).
 
 ### ✅ `lbfgs_maxiter_curvature.py` — the inner loop that quit early *(planned)*
 **Bug (multi-day):** an L-BFGS inner solve hit `maxiter=30` without converging;
