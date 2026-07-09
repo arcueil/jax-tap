@@ -19,10 +19,10 @@ The sampler body below contains ZERO logging code — it just defines
 1. WITHOUT jax-tap: the loop "completes"; the only clue is a frozen step size.
    A post-hoc check would wait for the whole run — and still tell you nothing
    about WHERE it went wrong.
-2. WITH jax-tap: wrap the UNMODIFIED call in ``with tap.record(...)`` and put a
-   primitive tap on ``"cholesky"``. The tap observes the ACTUAL factor L (by
-   primitive kind — no reconstruction), and the ``on_step`` callback LOUDLY
-   ANNOUNCES the first non-finite factor LIVE, mid-loop, before the scan
+2. WITH jax-tap: wrap the UNMODIFIED call in ``with tap.record(...)`` and pass
+   ``tap.watch_nan("cholesky")`` as the primitive tap. The tap observes the
+   ACTUAL factor L (by primitive kind — no reconstruction), and a built-in
+   ``[tap] FAIL ...`` line is emitted to stderr LIVE, mid-loop, before the scan
    finishes. Done testing? Delete the ``with`` block — nothing was ever there.
 3. The trap is FLOAT32-specific: the kernel's conditioning plateaus at a
    realistic lambda_min = 1e-12 — below float32's eps (silently singular) but
@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-
 import jaxtap as tap
 
 
@@ -79,23 +78,11 @@ def run_demo(x64: bool) -> dict:
     final_log_step = float(run(log_step0))
 
     # ---------------- WITH jax-tap ----------------
-    # The tap addresses the cholesky primitive BY KIND and reduces its output
-    # on-device to one bool (reduce-on-device: only the bool crosses to host).
-    # `announce` streams LIVE — it fires DURING the scan, not after.
-    announced = []
-
-    def announce(e: tap.TapEvent) -> None:
-        if "cholesky" in e.path and not bool(e.value) and not announced:
-            announced.append(e.step)
-            print(
-                f"    >>> LIVE: cholesky factor went NON-FINITE at step {e.step} "
-                f"(path {e.path}) — announced BEFORE the scan finished <<<"
-            )
-
-    with tap.record(
-        taps=[tap.on("cholesky", select=lambda outs: jnp.all(jnp.isfinite(outs[0])))],
-        on_step=announce,
-    ) as rec:
+    # tap.watch_nan("cholesky", once=True) wires up the primitive tap: it reduces the
+    # cholesky output on-device to a single all-isfinite bool, and emits exactly ONE
+    # "[tap] FAIL ..." line to stderr LIVE on the first non-finite step (once=True
+    # suppresses the repeated FAIL for every subsequent step).
+    with tap.record(taps=[tap.watch_nan("cholesky", once=True)]) as rec:
         run(log_step0)  # <-- UNMODIFIED user code. Delete this `with` block
         #                     and nothing was ever there.
 
@@ -116,7 +103,7 @@ def main() -> None:
     if r32["first_bad_step"] is not None:
         print(
             f"  with jax-tap:     first non-finite cholesky at step "
-            f"{r32['first_bad_step']} / {r32['n_steps']} (also announced live above)"
+            f"{r32['first_bad_step']} / {r32['n_steps']} (live [tap] FAIL line on stderr above)"
         )
 
     print("\nFLOAT64 (the fix):")

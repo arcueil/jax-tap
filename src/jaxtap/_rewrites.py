@@ -69,13 +69,19 @@ def rewrite_scan(
     # Forward all params except the ones we must reshape around.
     rest = {k: v for k, v in p.items() if k not in ("jaxpr", "num_consts", "num_carry")}
 
+    # total: the scan length, known at trace time.  Passed to tap_cb and
+    # down into interp_fn so that primitive taps inside the body see the
+    # correct TapEvent.total (the enclosing scan's length).
+    total: int = p["length"]
+
     def body_fn(carry_step, x):
         carry, step = carry_step
         # x arrives with the same pytree structure as xs.
         # Unpack into a flat list for the jaxpr body call.
         x_flat = list(x) if isinstance(x, (list, tuple)) else [x]
-        # Pass the live step as the 7th argument so _interp can thread it to
-        # primitive taps (including those hidden behind jit boundaries).
+        # Pass the live step as the 7th argument and total as the 8th so
+        # _interp can thread them to primitive taps (including those hidden
+        # behind jit boundaries).
         outs = interp_fn(
             body.jaxpr,
             body.consts,
@@ -84,11 +90,13 @@ def rewrite_scan(
             ops,
             here + "/",
             step,
+            total,
         )
         new_carry = outs[:ncar]
         ys = outs[ncar:]
         # tap_cb already has sample_every gating baked in (see verbose() in __init__.py).
-        tap_cb(here, step, *new_carry)
+        # total is a Python int captured from the enclosing rewrite_scan scope.
+        tap_cb(here, step, *new_carry, total=total)
         return (new_carry, step + 1), ys
 
     (carry_out, _), ys = jax.lax.scan(
@@ -138,12 +146,14 @@ def rewrite_while(
 
     def body_fn(carry_step):
         carry, step = carry_step
-        # Pass the live step as the 7th argument for primitive tap threading.
+        # Pass the live step as the 7th argument and None as the 8th (total)
+        # because while_loop length is not known at trace time.
         new_carry = interp_fn(
-            bj.jaxpr, bj.consts, [*bconsts, *carry], tap_cb, ops, here + "/", step
+            bj.jaxpr, bj.consts, [*bconsts, *carry], tap_cb, ops, here + "/", step, None
         )
         # tap_cb already has sample_every gating baked in (see verbose() in __init__.py).
-        tap_cb(here, step, *new_carry)
+        # total=None because while_loop length is unknown at trace time.
+        tap_cb(here, step, *new_carry, total=None)
         return (new_carry, step + 1)
 
     carry_out, _ = jax.lax.while_loop(cond_fn, body_fn, (init, jnp.int32(0)))

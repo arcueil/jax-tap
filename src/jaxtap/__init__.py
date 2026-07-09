@@ -38,10 +38,12 @@ Ergonomic collector helper::
 from __future__ import annotations
 
 import dataclasses
+import sys
 import warnings
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 import jax
+import jax.numpy as jnp
 
 from ._walker import interpret
 
@@ -53,6 +55,9 @@ __all__ = [
     "TapEvent",
     "PrimitiveTap",
     "on",
+    "watch_nan",
+    "print",
+    "primitives",
     "verbose",
     "record",
     "emergency_restore",
@@ -74,6 +79,7 @@ class TapEvent:
     path: str  # stable address, e.g. "scan[0]/while[0]"
     step: int  # iteration index (0-based); -1 for primitive taps outside any loop
     value: Any  # selected carry payload delivered to the host
+    total: "int | None" = None  # enclosing loop length when known (scan: N; while/outside: None)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -84,6 +90,10 @@ class PrimitiveTap:
 
         tap.on("cholesky")
         tap.on("cholesky", select=lambda outs: jnp.all(jnp.isfinite(outs[0])))
+        tap.on("cholesky",
+               select=lambda outs: jnp.all(jnp.isfinite(outs[0])),
+               alert=lambda ok: not ok,
+               label="NaN/Inf")
 
     Parameters
     ----------
@@ -95,6 +105,38 @@ class PrimitiveTap:
         on-device before the host callback.  Receives a tuple of the primitive's
         output arrays; only the selector's return value crosses the host boundary.
         Default: ``None`` — the full output tuple is delivered as ``TapEvent.value``.
+    alert:
+        Optional HOST-side predicate called with the (host-side) ``TapEvent.value``.
+        When it returns truthy, jaxtap emits one terse line to stderr::
+
+            [tap] FAIL {path} {step}/{total_or_'?'}: {label}
+
+        The predicate runs inside the ``_guard`` discipline (never propagates).
+        Alert firing is independent of ``on_step`` / the recorder — both still
+        receive every event.
+    label:
+        Short string used in the alert line.  Default: the primitive name.
+    output:
+        Select a single primitive output by index before passing to ``select``
+        (or before delivering the value when ``select`` is ``None``).
+        ``None`` (default) passes the full output tuple.  Out-of-range indices
+        raise ``IndexError`` at trace time.
+
+        .. warning:: **Primitive output order ≠ Python API order.**
+            The ``output=k`` index refers to the JAX *primitive's* output list,
+            not the Python-level return tuple of the high-level function.  These
+            can differ.  For example, ``jnp.linalg.eigh`` returns
+            ``(eigenvalues, eigenvectors)`` in Python, but the underlying
+            ``eigh`` primitive emits ``(eigenvectors, eigenvalues)`` — so
+            ``output=0`` gives eigenvectors, not eigenvalues.  Use
+            ``tap.print(prim_name)`` (no ``output=``) first to inspect the
+            actual output layout before relying on a specific index.
+    once:
+        When ``True``, the alert / print fires at most once per :func:`verbose`
+        call (B-form) or per trace (A-form).  Subsequent truthy events from the
+        same spec instance are silently dropped.  Default: ``False`` (every
+        truthy event fires).  Useful to suppress repetitive alert lines when only
+        the *first* occurrence matters.
 
     Scope
     -----
@@ -108,13 +150,28 @@ class PrimitiveTap:
     ------------
     ``TapEvent.step`` is the enclosing loop's live step value.  When a primitive
     tap fires outside any scan/while loop, ``step == -1`` (the sentinel).
+    ``TapEvent.total`` is the enclosing scan's length, or ``None`` for while loops
+    and for primitive taps outside any loop.
     """
 
     prim_name: str
-    select: Callable | None = None
+    select: "Callable | None" = None
+    alert: "Callable | None" = None
+    label: "str | None" = None
+    output: "int | None" = None
+    once: bool = False
+    # _printer: set by tap.print() — uses value format instead of FAIL label format.
+    _printer: bool = dataclasses.field(default=False, repr=False)
 
 
-def on(prim_name: str, select: Callable | None = None) -> PrimitiveTap:
+def on(
+    prim_name: str,
+    select: "Callable | None" = None,
+    alert: "Callable | None" = None,
+    label: "str | None" = None,
+    output: "int | None" = None,
+    once: bool = False,
+) -> PrimitiveTap:
     """Create a :class:`PrimitiveTap` spec.
 
     Parameters
@@ -122,20 +179,42 @@ def on(prim_name: str, select: Callable | None = None) -> PrimitiveTap:
     prim_name:
         Name of the JAX primitive to tap.
     select:
-        Optional on-device reducer applied to the primitive's output tuple.
+        Optional on-device reducer applied to the primitive's output tuple
+        (or to the single output when ``output=k`` is given).
+    alert:
+        Optional HOST-side predicate on the event value; when truthy, emits one
+        terse line to stderr: ``[tap] FAIL {path} {step}/{total}: {label}``.
+        Runs inside the ``_guard`` discipline (never propagates).
+    label:
+        Short label for the alert line.  Default: ``prim_name``.
+    output:
+        Select a single primitive output by index before calling ``select``
+        (or before delivering the value when ``select`` is ``None``).
+        ``None`` (default) passes the full output tuple.  Out-of-range indices
+        raise ``IndexError`` at trace time.
+
+        Note: indices refer to the JAX *primitive's* output order, which can
+        differ from the Python API's return order.  Use ``tap.print(prim_name)``
+        first to inspect the actual layout before relying on a specific index.
+    once:
+        When ``True``, the alert fires at most once per :func:`verbose` call.
+        Default: ``False``.
 
     Returns
     -------
     PrimitiveTap
     """
-    return PrimitiveTap(prim_name=prim_name, select=select)
+    return PrimitiveTap(
+        prim_name=prim_name, select=select, alert=alert, label=label, output=output, once=once
+    )
 
 
 # ---------------------------------------------------------------------------
-# Warn-once guard
+# Warn-once guards
 # ---------------------------------------------------------------------------
 
 _warned: set[int] = set()  # tracks id(on_step) that have warned once this session
+_alert_warned: set[int] = set()  # tracks id(alert_fn) that have warned once
 # NOTE: id() values can be reused after GC; warn-once dedup is best-effort for M0.
 
 
@@ -155,6 +234,79 @@ def _guard(on_step: Callable[[TapEvent], None], event: TapEvent) -> None:
                 warnings.warn(msg, UserWarning, stacklevel=1)
             except Exception:  # noqa: BLE001  -- handles python -W error
                 pass
+
+
+def _format_value(value: Any) -> str:
+    """Compact single-line repr of a host-side value for :func:`tap.print` output.
+
+    Uses numpy with ``printoptions(precision=4, threshold=8, edgeitems=2)`` so
+    large arrays truncate rather than flooding stderr.  Internal newlines are
+    collapsed to spaces so the result fits on one physical line.
+    """
+    import numpy as _np  # lazy — only imported when a tap.print actually fires
+
+    try:
+        arr = _np.asarray(value)
+        with _np.printoptions(precision=4, threshold=8, edgeitems=2):
+            raw = repr(arr)
+        return " ".join(raw.split())  # collapse internal newlines / extra spaces
+    except Exception:  # noqa: BLE001
+        try:
+            return " ".join(repr(value).split())
+        except Exception:  # noqa: BLE001
+            return "<unprintable>"
+
+
+def _fire_alert(spec: PrimitiveTap, event: TapEvent, _once_fired: "set[int] | None" = None) -> None:
+    """Fire ``spec.alert(event.value)`` and write the terse line to stderr if truthy.
+
+    Runs inside the ``_guard`` discipline: a raising alert predicate is caught,
+    warned once, and suppressed — it never propagates to the user.
+
+    When ``spec._printer`` is True (set by :func:`print`), the line uses the
+    value format ``[tap] {path} {step}/{total}: {value}`` instead of the FAIL
+    format ``[tap] FAIL {path} {step}/{total}: {label}``.
+
+    ``_once_fired`` is a per-:func:`verbose`-call set of spec ``id``\\ s that have
+    already emitted at least one line.  When ``spec.once`` is True and the spec's
+    id is already in the set, the call is a no-op (the once budget is spent).
+    """
+    alert_fn = spec.alert
+    assert alert_fn is not None  # caller must check
+    alert_id = id(alert_fn)
+    try:
+        should_alert = alert_fn(event.value)
+    except Exception as exc:  # noqa: BLE001
+        if alert_id not in _alert_warned:
+            _alert_warned.add(alert_id)
+            msg = (
+                f"jaxtap: alert predicate raised {type(exc).__name__}: {exc!s}. "
+                "Alert suppressed for this predicate to preserve program behaviour."
+            )
+            try:
+                warnings.warn(msg, UserWarning, stacklevel=1)
+            except Exception:  # noqa: BLE001
+                pass
+        return
+    if should_alert:
+        # once=True: fire at most once per verbose() call / per trace.
+        spec_id = id(spec)
+        if spec.once and _once_fired is not None:
+            if spec_id in _once_fired:
+                return
+            _once_fired.add(spec_id)
+        total_str = str(event.total) if event.total is not None else "?"
+        try:
+            if spec._printer:
+                # tap.print format: [tap] {path} {step}/{total}: {value_repr}
+                value_repr = _format_value(event.value)
+                sys.stderr.write(f"[tap] {event.path} {event.step}/{total_str}: {value_repr}\n")
+            else:
+                # alert format: [tap] FAIL {path} {step}/{total}: {label}
+                label = spec.label if spec.label is not None else spec.prim_name
+                sys.stderr.write(f"[tap] FAIL {event.path} {event.step}/{total_str}: {label}\n")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +402,11 @@ def verbose(
     if select is not None:
         # tap_cb is called INSIDE the traced computation (scan/while body),
         # so ``select`` runs on-device before the host-boundary crossing.
-        def _base_tap_cb(path: str, step: Any, *carry_leaves: Any) -> None:
+        # ``total`` is a Python int (or None) passed as a kwarg from the rewrites;
+        # it is captured in ``_host`` via closure — not a JAX argument.
+        def _base_tap_cb(
+            path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
+        ) -> None:
             selected = select(carry_leaves)
             flat_selected = jax.tree_util.tree_leaves(selected)
             # Capture pytree structure at Python (trace) time for host-side recon.
@@ -258,7 +414,7 @@ def verbose(
 
             def _host(step_: Any, *flat_vals: Any) -> None:
                 value = jax.tree_util.tree_unflatten(sel_tree, list(flat_vals))
-                _guard(on_step, TapEvent(path=path, step=int(step_), value=value))
+                _guard(on_step, TapEvent(path=path, step=int(step_), value=value, total=total))
 
             jax.debug.callback(_host, step, *flat_selected, ordered=False)
 
@@ -266,22 +422,26 @@ def verbose(
         # tap_cb is called INSIDE the traced computation; ``jax.debug.callback``
         # ships the carry leaves to the host.  ``path`` is a static Python string
         # captured in the closure.
-        def _base_tap_cb(path: str, step: Any, *carry_leaves: Any) -> None:  # type: ignore[misc]
+        def _base_tap_cb(
+            path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
+        ) -> None:  # type: ignore[misc]
             def _host(step_: Any, *leaves: Any) -> None:
-                _guard(on_step, TapEvent(path=path, step=int(step_), value=leaves))
+                _guard(on_step, TapEvent(path=path, step=int(step_), value=leaves, total=total))
 
             jax.debug.callback(_host, step, *carry_leaves, ordered=False)
 
     # Wrap with sample_every gate (device-side lax.cond) when k > 1.
     # Both branches return None (empty pytree) so lax.cond type-checks;
     # JAX's effects system ensures the debug callback fires only in the true branch.
+    # ``total`` is forwarded as a Python kwarg (not a JAX argument — it is a
+    # static int captured per-scan-call at trace time).
     if sample_every > 1:
         _uncapped = _base_tap_cb
 
-        def tap_cb(path: str, step: Any, *carry_leaves: Any) -> None:
+        def tap_cb(path: str, step: Any, *carry_leaves: Any, total: "int | None" = None) -> None:
             jax.lax.cond(
                 step % sample_every == 0,
-                lambda _: _uncapped(path, step, *carry_leaves),
+                lambda _: _uncapped(path, step, *carry_leaves, total=total),
                 lambda _: None,
                 step,
             )
@@ -291,25 +451,51 @@ def verbose(
 
     # Build the primitive-tap callback if any specs were provided.
     # This function is called from _interp after binding a matched primitive.
-    # It fires jax.debug.callback → _guard-wrapped on_step with a TapEvent.
+    # It fires jax.debug.callback → _guard-wrapped on_step with a TapEvent,
+    # then fires the spec's alert predicate (if any) on the host-side value.
     # path: Python string (static, determined at trace time)
     # step: JAX int32 (live, from enclosing loop) or jnp.int32(-1) (outside loop)
     # outvals: tuple of the primitive's output arrays (device-side)
     # spec: the matching PrimitiveTap
+    # total: Python int or None — enclosing scan length (None for while / outside loop)
+    #
+    # _once_fired tracks which specs have already fired once this verbose() call;
+    # created fresh here so each verbose() invocation has its own independent set.
+    # Scoped here (not module-global) so the once budget resets on each verbose() call.
+    _once_fired: set[int] = set()
     prim_tap_fn: Callable | None = None
     if taps:
 
-        def prim_tap_fn(path: str, step: Any, outvals: tuple, spec: PrimitiveTap) -> None:  # type: ignore[misc]
-            if spec.select is not None:
-                selected = spec.select(outvals)
+        def prim_tap_fn(
+            path: str, step: Any, outvals: tuple, spec: PrimitiveTap, total: "int | None" = None
+        ) -> None:  # type: ignore[misc]
+            # Apply output index selection first (trace-time bounds check).
+            if spec.output is not None:
+                k = spec.output
+                n = len(outvals)
+                if k < 0 or k >= n:
+                    raise IndexError(
+                        f"jaxtap: tap.on({spec.prim_name!r}, output={k}) — primitive has"
+                        f" {n} output(s) (valid indices: 0..{n - 1})"
+                    )
+                eff_outs: Any = outvals[k]
             else:
-                selected = outvals
+                eff_outs = outvals
+            if spec.select is not None:
+                selected = spec.select(eff_outs)
+            else:
+                selected = eff_outs
             flat_selected = jax.tree_util.tree_leaves(selected)
             sel_tree = jax.tree_util.tree_structure(selected)
+            _spec = spec  # capture for host closure
+            _of = _once_fired  # capture per-verbose() set by reference
 
             def _host(step_: Any, *flat_vals: Any) -> None:
                 value = jax.tree_util.tree_unflatten(sel_tree, list(flat_vals))
-                _guard(on_step, TapEvent(path=path, step=int(step_), value=value))
+                event = TapEvent(path=path, step=int(step_), value=value, total=total)
+                _guard(on_step, event)
+                if _spec.alert is not None:
+                    _fire_alert(_spec, event, _of)
 
             jax.debug.callback(_host, step, *flat_selected, ordered=False)
 
@@ -446,6 +632,234 @@ def record(
         taps=taps,
     )
     return tapped, recorder
+
+
+# ---------------------------------------------------------------------------
+# Convenience constructors
+# ---------------------------------------------------------------------------
+
+
+def watch_nan(
+    prim_name: str,
+    label: str = "NaN/Inf",
+    output: "int | None" = None,
+    once: bool = False,
+) -> PrimitiveTap:
+    """Create a :class:`PrimitiveTap` that alerts when any float output is non-finite.
+
+    Equivalent to::
+
+        tap.on(prim_name,
+               select=<device-side all-isfinite over all float outputs>,
+               alert=lambda ok: not ok,
+               label=label)
+
+    The ``select`` reduces over every float output leaf via ``jnp.isfinite``;
+    non-float outputs are skipped safely.  The ``alert`` fires when the result
+    is False (i.e. at least one NaN or Inf was found).
+
+    Parameters
+    ----------
+    prim_name:
+        JAX primitive name to watch (e.g. ``"cholesky"``).
+        Use :func:`primitives` to discover the correct string.
+    label:
+        Short label shown in the alert line.  Default: ``"NaN/Inf"``.
+    output:
+        Optional single-output index.  When given, the finiteness check applies
+        to that one output array (not a tuple) — useful for primitives such as
+        ``eigh`` which return multiple outputs and you only care about one.
+        ``None`` (default) checks all float outputs in the output tuple.
+
+        Note: indices refer to the JAX *primitive's* output order, which can
+        differ from the Python API's return order.  Use ``tap.print(prim_name)``
+        first to inspect the actual layout before relying on a specific index.
+    once:
+        When ``True``, the alert fires at most once per :func:`verbose` call.
+        Useful when only the first non-finite occurrence matters and you want to
+        suppress the flood of repeated FAIL lines for every subsequent step.
+        Default: ``False``.
+
+    Returns
+    -------
+    PrimitiveTap
+    """
+    if output is not None:
+        # Single-array mode: select receives one array, not a tuple.
+        def _select_finite_single(o: Any) -> Any:
+            try:
+                if jnp.issubdtype(o.dtype, jnp.floating):
+                    return jnp.all(jnp.isfinite(o))
+            except (AttributeError, TypeError):
+                pass
+            return jnp.bool_(True)
+
+        select_fn = _select_finite_single
+    else:
+        # Tuple mode: select receives the full output tuple.
+        def _select_finite_tuple(outs: tuple) -> Any:
+            checks = []
+            for o in outs:
+                try:
+                    if jnp.issubdtype(o.dtype, jnp.floating):
+                        checks.append(jnp.all(jnp.isfinite(o)))
+                except (AttributeError, TypeError):
+                    pass
+            if not checks:
+                return jnp.bool_(True)  # no float outputs — trivially ok
+            if len(checks) == 1:
+                return checks[0]
+            return jnp.all(jnp.stack(checks))
+
+        select_fn = _select_finite_tuple
+
+    return on(
+        prim_name, select=select_fn, alert=lambda ok: not ok, label=label, output=output, once=once
+    )
+
+
+def print(  # noqa: A001 — intentionally shadows builtin; internal code uses sys.stderr.write
+    prim_name: str,
+    output: "int | None" = None,
+    select: "Callable | None" = None,
+    label: "str | None" = None,
+    once: bool = False,
+) -> PrimitiveTap:
+    """Create a :class:`PrimitiveTap` that always prints the tapped value to stderr.
+
+    Every time the named primitive fires, emits one terse line to stderr::
+
+        [tap] {path} {step}/{total_or_'?'}: {value}
+
+    where ``value`` is formatted with
+    ``numpy.printoptions(precision=4, threshold=8, edgeitems=2)`` so large
+    arrays are truncated rather than flooding the terminal.  Internal newlines
+    in the numpy repr are collapsed to spaces so the event always fits on one
+    physical line.
+
+    This is the simplest diagnostic tool: add it while debugging, remove it
+    when done — no other code changes needed.
+
+    Parameters
+    ----------
+    prim_name:
+        JAX primitive name to tap (e.g. ``"dot_general"``).
+    output:
+        Optional single-output index.  When given, only that output array is
+        printed.  ``None`` prints the full output tuple.
+
+        Note: indices refer to the JAX *primitive's* output order, which can
+        differ from the Python API's return order.  Use ``tap.print(prim_name)``
+        without an index first to inspect the actual output layout.
+    select:
+        Optional on-device reducer applied before printing.  Receives the
+        output (single array if ``output=k``, tuple otherwise).
+    label:
+        Stored on the spec for composition with an additional ``alert``;
+        not shown in the print format itself.
+    once:
+        When ``True``, print only on the first fire per :func:`verbose` call.
+        Default: ``False``.
+
+    Returns
+    -------
+    PrimitiveTap
+
+    Examples
+    --------
+    ::
+
+        with tap.record(taps=[tap.print("dot_general")]) as rec:
+            result = model(x)
+        # [tap] scan[0]/jit[0]/dot_general[0] 3/25: array([[0.1, ...]])
+    """
+    return PrimitiveTap(
+        prim_name=prim_name,
+        output=output,
+        select=select,
+        alert=lambda v: True,  # always fire
+        label=label,
+        once=once,
+        _printer=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Discovery helper
+# ---------------------------------------------------------------------------
+
+
+def _count_prims(jaxpr: Any, counts: "dict[str, int]") -> None:
+    """Recursively count all primitives in a Jaxpr, descending into sub-jaxprs."""
+    for eqn in jaxpr.eqns:
+        name = eqn.primitive.name
+        counts[name] = counts.get(name, 0) + 1
+        p = eqn.params
+        # scan, jit/pjit/closed_call: params["jaxpr"] is a ClosedJaxpr.
+        # remat2: params["jaxpr"] is a bare Jaxpr (no .jaxpr attr).
+        if "jaxpr" in p:
+            sub = p["jaxpr"]
+            if hasattr(sub, "jaxpr"):  # ClosedJaxpr
+                _count_prims(sub.jaxpr, counts)
+            elif hasattr(sub, "eqns"):  # bare Jaxpr
+                _count_prims(sub, counts)
+        # while_loop: params["cond_jaxpr"] and params["body_jaxpr"] are ClosedJaxprs.
+        if "cond_jaxpr" in p:
+            cj = p["cond_jaxpr"]
+            if hasattr(cj, "jaxpr"):
+                _count_prims(cj.jaxpr, counts)
+        if "body_jaxpr" in p:
+            bj = p["body_jaxpr"]
+            if hasattr(bj, "jaxpr"):
+                _count_prims(bj.jaxpr, counts)
+        # cond/switch: params["branches"] is a tuple of ClosedJaxprs.
+        if "branches" in p:
+            for branch in p["branches"]:
+                if hasattr(branch, "jaxpr"):
+                    _count_prims(branch.jaxpr, counts)
+        # custom_jvp_call / custom_vjp_call: params["call_jaxpr"].
+        if "call_jaxpr" in p:
+            cj = p["call_jaxpr"]
+            if hasattr(cj, "jaxpr"):
+                _count_prims(cj.jaxpr, counts)
+            elif hasattr(cj, "eqns"):
+                _count_prims(cj, counts)
+
+
+def primitives(f: Callable, *args: Any) -> "dict[str, int]":
+    """Find the string to pass to tap.on().
+
+    Traces ``f(*args)`` once (via ``jax.make_jaxpr``) and returns a dict
+    ``{primitive_name: count}`` for every primitive in the program, including
+    inside nested sub-jaxprs (scan/while bodies, jit/pjit boundaries, cond
+    branches, remat regions).  Read-only — no instrumentation, no execution.
+
+    Parameters
+    ----------
+    f:
+        The function to trace.
+    *args:
+        Example arguments (shapes / dtypes determine the trace; values are unused).
+
+    Returns
+    -------
+    dict[str, int]
+        Mapping ``primitive_name → total occurrence count`` across all nesting levels.
+
+    Examples
+    --------
+    ::
+
+        tap.primitives(run, log_step0)
+        # {'scan': 1, 'cholesky': 1, 'integer_pow': 1, ...}
+
+        # Pass the name directly to tap.on():
+        tap.watch_nan("cholesky")
+    """
+    closed = jax.make_jaxpr(f)(*args)
+    counts: dict[str, int] = {}
+    _count_prims(closed.jaxpr, counts)
+    return counts
 
 
 # ---------------------------------------------------------------------------

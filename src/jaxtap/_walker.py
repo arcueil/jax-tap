@@ -237,6 +237,7 @@ def interpret(
             prim_taps=prim_taps,
             prim_tap_fn=prim_tap_fn,
             _start_cf_index=_start_cf_index,
+            total=None,
         )
     return jax.tree_util.tree_unflatten(out_tree, out_flat)
 
@@ -265,6 +266,7 @@ def _interp(
     prim_taps: Sequence[Any] = (),
     prim_tap_fn: "Callable | None" = None,
     _start_cf_index: int = 0,
+    total: "int | None" = None,
 ) -> list:
     """Evaluate ``jaxpr`` against ``args``, rewriting CF primitives in ``ops``.
 
@@ -277,12 +279,17 @@ def _interp(
     prim_taps:
         Sequence of ``PrimitiveTap`` specs for primitive-name tapping.
     prim_tap_fn:
-        Host callback builder; called as ``prim_tap_fn(path, step, outvals, spec)``
+        Host callback builder; called as ``prim_tap_fn(path, step, outvals, spec, total)``
         for each matched primitive.
     _start_cf_index:
         Private kwarg.  Initial value for the top-level boundary counter.
         Forwarded from ``interpret()``; zero for all recursive calls (the counter
         starts fresh at each nesting level).
+    total:
+        Python int or None.  The enclosing loop's iteration count when known
+        (scan: set by ``rewrite_scan`` from ``eqn.params["length"]``; while and
+        outside-loop callers pass ``None``).  Forwarded to ``prim_tap_fn`` so
+        that ``TapEvent.total`` is populated correctly.
     """
     # Normalise sentinel: None means "not inside any loop".
     if step is None:
@@ -304,9 +311,9 @@ def _interp(
     # Per-level, per-prim-name occurrence counter for primitive tap addressing.
     n_prim_tap: dict[str, int] = {}
 
-    # Closure that propagates where/max_depth/step/prim_taps through recursive
-    # calls; _rewrites.py calls interp_fn with a 7-argument signature
-    # (the 7th being the live step).
+    # Closure that propagates where/max_depth/step/prim_taps/total through
+    # recursive calls.  _rewrites.py calls interp_fn with an 8-argument
+    # signature (7th: live step, 8th: enclosing loop total or None).
     def _recurse(
         jaxpr_: Any,
         consts_: Any,
@@ -315,6 +322,7 @@ def _interp(
         ops_: Any,
         path_: Any,
         step_: Any = None,
+        total_: "int | None" = None,
     ) -> Any:
         return _interp(
             jaxpr_,
@@ -328,6 +336,7 @@ def _interp(
             step=step_,
             prim_taps=prim_taps,
             prim_tap_fn=prim_tap_fn,
+            total=total_,
         )
 
     for eqn in jaxpr.eqns:
@@ -375,9 +384,10 @@ def _interp(
 
                 def _make_branch(branch_jaxpr: "jax_core.ClosedJaxpr", branch_idx: int) -> Callable:
                     branch_path = f"{path}cond[{cf_index}]/b{branch_idx}/"
-                    # Capture step via default arg so each branch closure holds
-                    # the correct enclosing step at definition time.
+                    # Capture step and total via default args so each branch closure
+                    # holds the correct values at definition time.
                     _step = step
+                    _total = total
 
                     def branch_fn(*ops_tuple: Any) -> tuple:
                         return tuple(
@@ -389,6 +399,7 @@ def _interp(
                                 ops,
                                 branch_path,
                                 _step,
+                                _total,
                             )
                         )
 
@@ -407,13 +418,18 @@ def _interp(
                 prevent_cse = eqn.params["prevent_cse"]
                 policy = eqn.params["policy"]
                 new_path = f"{path}remat[{cf_index}]/"
-                # Capture step via default arg for safe closure semantics.
+                # Capture step and total via default args for safe closure semantics.
                 _step = step
+                _total = total
 
                 def _inner_remat(
-                    *flat_in: Any, _j: Any = inner_jaxpr, _p: str = new_path, _s: Any = _step
+                    *flat_in: Any,
+                    _j: Any = inner_jaxpr,
+                    _p: str = new_path,
+                    _s: Any = _step,
+                    _t: "int | None" = _total,
                 ) -> tuple:
-                    return tuple(_recurse(_j, [], list(flat_in), tap_cb, ops, _p, _s))
+                    return tuple(_recurse(_j, [], list(flat_in), tap_cb, ops, _p, _s, _t))
 
                 result = jax.checkpoint(_inner_remat, prevent_cse=prevent_cse, policy=policy)(
                     *invals
@@ -431,15 +447,24 @@ def _interp(
                 # from an enclosing scan body trace are not forwarded across a
                 # JIT boundary, causing incorrect constant-folding.  Passing step
                 # explicitly makes it a proper JIT input that changes per iteration.
+                # total is a Python int (static per scan), safe to capture via closure.
                 # Limitation: the fresh jax.jit does not thread the original
                 # donated_invars/in_shardings/out_shardings params (acceptable pre-v1).
                 inner = eqn.params["jaxpr"]  # ClosedJaxpr
                 new_path = f"{path}jit[{cf_index}]/"
+                _total = total  # Python int, not a JAX arg — capture via closure
 
-                def _inner_jit(*flat_in_and_step: Any, _j: Any = inner, _p: str = new_path) -> Any:
+                def _inner_jit(
+                    *flat_in_and_step: Any,
+                    _j: Any = inner,
+                    _p: str = new_path,
+                    _t: "int | None" = _total,
+                ) -> Any:
                     # step is the last positional argument.
                     *flat_in, step_in = flat_in_and_step
-                    return _recurse(_j.jaxpr, _j.consts, list(flat_in), tap_cb, ops, _p, step_in)
+                    return _recurse(
+                        _j.jaxpr, _j.consts, list(flat_in), tap_cb, ops, _p, step_in, _t
+                    )
 
                 result = jax.jit(_inner_jit)(*invals, step)
                 outvals = list(result) if isinstance(result, (list, tuple)) else [result]
@@ -473,6 +498,7 @@ def _interp(
 
             # Primitive tap: check if any spec matches this primitive name.
             # Fires on EVERY matched non-boundary, non-AD primitive.
+            # total is threaded from the enclosing loop (scan length, or None).
             if prim_taps and prim_tap_fn is not None:
                 matching = [spec for spec in prim_taps if spec.prim_name == prim_name]
                 if matching:
@@ -480,7 +506,7 @@ def _interp(
                     n_prim_tap[prim_name] = j + 1
                     tap_path = f"{path}{prim_name}[{j}]"
                     for spec in matching:
-                        prim_tap_fn(tap_path, step, tuple(outvals), spec)
+                        prim_tap_fn(tap_path, step, tuple(outvals), spec, total)
 
         for v, val in zip(eqn.outvars, outvals):
             env[v] = val
