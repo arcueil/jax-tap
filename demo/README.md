@@ -90,14 +90,19 @@ diagnostics can miss for a long time if nothing watches per-draw statistics.
 fires the moment depth hits its ceiling.
 **Tap class:** per-draw event / carry tap.
 
-### ⚠️ `mass_matrix_ndim_mismatch.py` — dense config ran diagonal *(planned)*
-**Bug pattern:** a sampler configured for a dense mass matrix silently runs
-with a 1-D (diagonal) one — a shape/rank mismatch rather than a value bug, so
-everything computes; it is just the wrong algorithm.
-**Will show:** a runtime tap on the mass matrix's `ndim` catches the mismatch.
-**Caveat:** the *ideal* here is a **trace-time shape tap** (static, zero
-runtime cost); that tap class is roadmap, so this file approximates with a
-runtime tap.
+### ⚠️ `mass_matrix_ndim_mismatch.py` — dense config ran diagonal
+**Bug pattern:** a sampler kernel dispatches on the mass matrix's `ndim`; a
+plumbing bug hands it a 1-D matrix although the user configured dense — the
+wrong algorithm runs silently (nothing errors; mixing quietly degrades on
+correlated targets).
+**What it shows:** the executed PRIMITIVES are the fingerprint — the dense
+path contains `dot_general`, the diagonal path only `mul`. `tap.primitives()`
+reads it at trace time (zero runtime cost): buggy `dot_general=0` vs fixed
+`=1`. A `tap.print("dot_general", once=True)` runtime check makes ABSENCE the
+live symptom (buggy run: silence; fixed run: one line). Also a practical tip:
+tap the DISTINCTIVE primitive — generic ones like `mul` match PRNG internals.
+**Caveat:** the *ideal* is a dedicated **trace-time shape tap** (roadmap);
+`tap.primitives()` is the shipped approximation.
 
 ### ⚠️ `async_dispatch_compile_blowup.py` — execution hidden as "tracing" *(planned)*
 **Bug pattern:** JAX dispatches asynchronously, so naive wall-clock timing can
