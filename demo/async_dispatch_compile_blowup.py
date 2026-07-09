@@ -11,9 +11,12 @@ HARD TO DETECT: the first call is one indivisible wall-time measurement —
 nothing in user code marks where compilation ends and execution begins.
 WITH TAP: tap events are emitted by the RUNNING program, so the FIRST event's
 arrival timestamp IS the compile/execute boundary. One tap splits the opaque
-first-call window into (trace+compile) vs (execution). NOTE: the ideal is a
-dedicated jit-event tap class (trace/compile/execute timestamps — roadmap);
-event-arrival timing is the shipped approximation.
+first-call window into (trace+compile) vs (execution) — which doubles as a
+FEATURE: from a single first call you get the true compile cost AND a free
+forecast of steady-state runtime (the execution part), before ever running
+the compiled program again. NOTE: the ideal is a dedicated jit-event tap
+class (trace/compile/execute timestamps — roadmap); event-arrival timing is
+the shipped approximation.
 
 Run:  uv run python demo/async_dispatch_compile_blowup.py
 """
@@ -80,8 +83,9 @@ def main() -> None:
     print(f"\nwith jax-tap (first event = compile/execute boundary):")
     print(f"  trace+compile : {compile_part:.2f}s")
     print(f"  execution     : {exec_part:.2f}s  <- was HIDDEN inside 'compilation'")
-    print(f"  ({hidden:.0%} of the reported first-call number was actually execution;")
-    print(f"   cross-check: the same program's steady-state run measures {steady_exec:.2f}s)")
+    print(f"  ({hidden:.0%} of the reported first-call number was actually execution)")
+    print(f"  -> free forecast from ONE call: steady-state runtime ~{exec_part:.2f}s")
+    print(f"     (validated: the actual second run measures {steady_exec:.2f}s)")
 
     ok = (abs(exec_part - steady_exec) / steady_exec < 0.5) and hidden > 0.3
     print(f"\nRESULT: tap arrival time splits compile vs execution "
