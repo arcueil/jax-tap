@@ -18,6 +18,11 @@ what crosses the host boundary::
 
     tap.verbose(f, on_step=cb, select=lambda carry: carry[0].mean())
 
+Path-aware select (M1d): if ``select`` accepts a ``path`` kwarg or 2nd positional
+parameter, jaxtap passes the stable node address at call time::
+
+    tap.verbose(f, on_step=cb, select=lambda carry, *, path: {"node": path, "v": carry[0]})
+
 Primitive taps observe named JAX primitives by kind, with zero modification
 to the user's code::
 
@@ -38,6 +43,7 @@ Ergonomic collector helper::
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import sys
 import warnings
 from typing import TYPE_CHECKING, Any, Callable, Sequence
@@ -105,6 +111,13 @@ class PrimitiveTap:
         on-device before the host callback.  Receives a tuple of the primitive's
         output arrays; only the selector's return value crosses the host boundary.
         Default: ``None`` — the full output tuple is delivered as ``TapEvent.value``.
+
+        **Path-aware form** (M1d FIX 3): if the callable accepts a ``path``
+        parameter (keyword or 2nd positional), jaxtap calls
+        ``select(eff_outs, path=path)`` where ``path`` is the primitive tap's
+        stable address (e.g. ``"scan[0]/jit[0]/cholesky[0]"``).  Inspected once
+        at ``verbose()`` time; no per-step overhead.  Single-argument selectors
+        unchanged.
     alert:
         Optional HOST-side predicate called with the (host-side) ``TapEvent.value``.
         When it returns truthy, jaxtap emits one terse line to stderr::
@@ -215,6 +228,51 @@ def on(
     return PrimitiveTap(
         prim_name=prim_name, select=select, alert=alert, label=label, output=output, once=once
     )
+
+
+# ---------------------------------------------------------------------------
+# Path-aware select inspection (FIX 3)
+# ---------------------------------------------------------------------------
+
+
+def _accepts_path(fn: "Callable") -> bool:
+    """Return True if ``fn`` accepts ``path`` as a keyword argument or 2nd positional.
+
+    Inspected once at trace time (Python level) when ``verbose()`` is called so
+    the branch is resolved statically — no per-step overhead.
+
+    Accepts:
+    - ``select(leaves, *, path)``  — keyword-only 'path'
+    - ``select(leaves, path)``     — 2nd positional-or-keyword parameter named 'path'
+    - ``select(leaves, path_str)`` — any name works if it is the 2nd positional
+
+    Does NOT accept ``path`` through **kwargs to avoid false positives.
+    Returns False on any introspection failure (e.g. built-in callables).
+    """
+    try:
+        sig = inspect.signature(fn)
+        params = list(sig.parameters.values())
+        # Named 'path' anywhere in the signature (kwarg or positional)
+        if "path" in sig.parameters:
+            param = sig.parameters["path"]
+            # Exclude **kwargs — that would match everything
+            if param.kind != inspect.Parameter.VAR_KEYWORD:
+                return True
+        # 2nd positional parameter (any name) — caller passes path=
+        positional = [
+            p
+            for p in params
+            if p.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        if len(positional) >= 2:
+            return True
+        return False
+    except (ValueError, TypeError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +416,14 @@ def verbose(
         traced program before the host callback.  Receives a tuple of carry
         leaves; only the selector's output crosses the host boundary.
         Default: the full carry tuple.
+
+        **Path-aware form** (M1d FIX 3): if the callable accepts a ``path``
+        parameter (either as a keyword argument or as the 2nd positional
+        parameter), jaxtap calls ``select(carry_leaves, path=path)`` where
+        ``path`` is the stable node-address string (e.g. ``"scan[0]"``).
+        This is inspected once at ``verbose()`` call time so there is no
+        per-step overhead.  Back-compat: single-argument selectors are
+        unchanged.
     ops:
         Which control-flow operators to tap.  Accepted values: ``"scan"``,
         ``"while_loop"``.  Default: both.
@@ -413,6 +479,11 @@ def verbose(
     internal_ops: frozenset[str] = frozenset(_OP_NAME_MAP[op] for op in ops if op in _OP_NAME_MAP)
 
     if select is not None:
+        # FIX 3: inspect select once at verbose() call time.
+        # If it accepts 'path' (kwarg or 2nd positional), call select(leaves, path=path);
+        # otherwise call select(leaves) for backward compatibility.
+        _select_wants_path: bool = _accepts_path(select)
+
         # tap_cb is called INSIDE the traced computation (scan/while body),
         # so ``select`` runs on-device before the host-boundary crossing.
         # ``total`` is a Python int (or None) passed as a kwarg from the rewrites;
@@ -420,7 +491,10 @@ def verbose(
         def _base_tap_cb(
             path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
         ) -> None:
-            selected = select(carry_leaves)
+            # _select_wants_path is a Python bool: this branch resolves at trace time.
+            selected = (
+                select(carry_leaves, path=path) if _select_wants_path else select(carry_leaves)
+            )
             flat_selected = jax.tree_util.tree_leaves(selected)
             # Capture pytree structure at Python (trace) time for host-side recon.
             sel_tree = jax.tree_util.tree_structure(selected)
@@ -476,6 +550,11 @@ def verbose(
     # created fresh here so each verbose() invocation has its own independent set.
     # Scoped here (not module-global) so the once budget resets on each verbose() call.
     _once_fired: set[int] = set()
+    # FIX 3: precompute per-spec path-awareness flag once at verbose() call time.
+    _spec_path_flags: dict[int, bool] = {}
+    for _spec_item in taps:
+        if _spec_item.select is not None:
+            _spec_path_flags[id(_spec_item)] = _accepts_path(_spec_item.select)
     prim_tap_fn: Callable | None = None
     if taps:
 
@@ -500,7 +579,11 @@ def verbose(
             else:
                 eff_outs = outvals
             if spec.select is not None:
-                selected = spec.select(eff_outs)
+                # FIX 3: pass path= if the per-tap select accepts it.
+                _pspec_wants_path = _spec_path_flags.get(id(spec), False)
+                selected = (
+                    spec.select(eff_outs, path=path) if _pspec_wants_path else spec.select(eff_outs)
+                )
             else:
                 selected = eff_outs
             flat_selected = jax.tree_util.tree_leaves(selected)
