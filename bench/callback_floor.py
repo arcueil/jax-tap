@@ -1,5 +1,7 @@
 """
-bench_overhead.py — "What does the jaxtap lens cost?"
+bench/callback_floor.py — "What is the irreducible callback floor?"
+
+Renamed from bench_overhead.py (bench restructure).  Content and arms are unchanged.
 
 Four arms for a representative scan body (dim=8 float32 carry,
 body: c = c * 1.01 + sin(x)):
@@ -37,8 +39,8 @@ Prim-tap-only caveat
 
 Usage
 -----
-  uv run python bench/bench_overhead.py           # full run (~10 min)
-  uv run python bench/bench_overhead.py --smoke   # smoke run at N=100 (<30 s)
+  uv run python bench/callback_floor.py           # full run (~10 min)
+  uv run python bench/callback_floor.py --smoke   # smoke run at N=100 (<30 s)
 """
 
 from __future__ import annotations
@@ -275,11 +277,7 @@ def print_tables(rows: list[dict], compile_rows: list[tuple], smoke: bool) -> No
         " | median (µs/step) | min (µs/step)"
         " | vs bare (µs) | vs manual (µs) |"
     )
-    sep = (
-        "|-----|---|----|------"
-        "|-----------------|---------------"
-        "|-------------|----------------|"
-    )
+    sep = "|-----|---|----|------|-----------------|---------------|-------------|----------------|"
     print(hdr)
     print(sep)
 
@@ -329,7 +327,7 @@ def print_tables(rows: list[dict], compile_rows: list[tuple], smoke: bool) -> No
     if smoke:
         print()
         print(
-            "*Full run: `PYTHONUNBUFFERED=1 uv run python bench/bench_overhead.py 2>&1 | tee bench/run.log`*"
+            "*Full run: `PYTHONUNBUFFERED=1 uv run python bench/callback_floor.py 2>&1 | tee bench/callback_floor_run.log`*"
         )
 
 
