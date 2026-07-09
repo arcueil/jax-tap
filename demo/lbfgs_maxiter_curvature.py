@@ -38,7 +38,7 @@ def inner_solve(m, z0):
     def body(c):
         z, it, _ = c
         z = z - 0.6 * jnp.tanh(z - m)  # damped Newton step (bounded move)
-        # ╔═ jax-tap virtual injection ═══════════════════════════════════╗
+        # ╔═ jax-tap virtual injection ════════════════════════════════════╗
         # ║ print(it + 1, |sinh(z - m)|)  — the carry this body RETURNS    ║
         # ╚═ fires at this return, every iteration, 4 levels deep ═════════╝
         return (z, it + 1, jnp.sinh(z - m))

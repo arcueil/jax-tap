@@ -28,7 +28,7 @@ def make_sampler(n_steps: int):
         c = 1.0 - 10.0 ** (-jnp.minimum(k, 12.0))
         M = jnp.array([[1.0, c], [c, 1.0]], dtype=c.dtype)
         L = jnp.linalg.cholesky(M)  # <-- BUG LIVES HERE: silently non-finite in f32
-        # ╔═ jax-tap virtual injection ═══════════════════════════════════╗
+        # ╔═ jax-tap virtual injection ════════════════════════════════════╗
         # ║ if not isfinite(L).all(): print(step, "NaN/Inf")               ║
         # ╚═ fires as if written HERE — this function is never edited ═════╝
         logdens = -0.5 * 2.0 * jnp.sum(jnp.log(jnp.diag(L)))
