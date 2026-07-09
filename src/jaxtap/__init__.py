@@ -95,7 +95,32 @@ __all__ = [
 
 @dataclasses.dataclass(frozen=True)
 class TapEvent:
-    """A single telemetry emission from inside a tapped control-flow operator."""
+    """A single telemetry emission from a tapped control-flow operation.
+
+    TapEvent objects are delivered to the host via the ``on_step`` callback
+    and represent one snapshot from inside a scan, while_loop, or primitive
+    tap. All fields are immutable.
+
+    Parameters
+    ----------
+    path : str
+        Stable hierarchical address of the tapped node, e.g.
+        ``"scan[0]/jit[0]/cholesky[0]"``. For carry taps, this is the
+        control-flow node. For primitive taps, this includes the primitive
+        name and occurrence index.
+    step : int
+        Enclosing loop iteration index (0-based). For primitive taps that
+        fire outside any loop, this is ``-1`` (sentinel).
+    value : Any
+        The selected value delivered to the host (after applying the ``select``
+        function, if given). When ``select`` is ``None``, this is a flat tuple
+        of the carry's leaf elements (pytree structure is erased by tracing).
+    total : int or None, optional
+        The enclosing loop's total iteration count when known. For ``scan``,
+        this is the loop length ``N``. For ``while_loop``, outside any loop,
+        or for primitive taps outside any loop, this is ``None``. Default:
+        ``None``.
+    """
 
     path: str  # stable address, e.g. "scan[0]/while[0]"
     step: int  # iteration index (0-based); -1 for primitive taps outside any loop
@@ -241,6 +266,24 @@ def on(
     Returns
     -------
     PrimitiveTap
+
+    Examples
+    --------
+    Create a basic primitive tap for cholesky::
+
+        spec = tap.on("cholesky")
+
+    Tap cholesky with a finiteness check (select returns bool)::
+
+        spec = tap.on("cholesky",
+                      select=lambda outs: jnp.all(jnp.isfinite(outs[0])),
+                      alert=lambda ok: not ok,
+                      label="NaN/Inf")
+
+    Use a predicate label that is returned as a string::
+
+        spec = tap.on("cholesky",
+                      alert=lambda ok: "matrix singular" if not ok else False)
     """
     return PrimitiveTap(
         prim_name=prim_name,
@@ -509,18 +552,28 @@ def verbose(
         call.  Subsequent truthy events from the same path are silently dropped.
         Mirrors the ``once=`` semantics of :func:`on`.  Default: ``False``.
     select:
-        Optional traced-side callable applied to the carry tuple INSIDE the
-        traced program before the host callback.  Receives a tuple of carry
-        leaves; only the selector's output crosses the host boundary.
-        Default: the full carry tuple.
+        Optional traced-side callable applied to the carry **on-device** before
+        the host boundary crossing. Receives a **flat tuple of carry leaves**
+        (pytree structure is erased by JAX tracing — jaxprs are flat).
+        Only the selector's return value crosses to the host; its pytree
+        structure is captured at trace time and reconstructed on the host.
+        Default: ``None`` — the full flat carry tuple is delivered as
+        ``TapEvent.value``.
 
-        **Path-aware form** (M1d FIX 3): if the callable accepts a ``path``
-        parameter (either as a keyword argument or as the 2nd positional
-        parameter), jaxtap calls ``select(carry_leaves, path=path)`` where
-        ``path`` is the stable node-address string (e.g. ``"scan[0]"``).
-        This is inspected once at ``verbose()`` call time so there is no
-        per-step overhead.  Back-compat: single-argument selectors are
-        unchanged.
+        **CRITICAL**: the ``select`` function receives **flat leaves**, not the
+        original carry pytree. To use the carry's structure, reshape inside
+        ``select`` or use a path-aware form (see below).
+
+        Example: if carry is ``{"a": x, "b": [y, z]}``, ``select`` receives
+        a flat tuple ``(x, y, z)`` and must index by position:
+        ``select=lambda leaves: leaves[0] + leaves[1]`` (selects ``x + y``).
+
+        **Path-aware form**: if the callable accepts a ``path`` parameter
+        (keyword or 2nd positional), jaxtap calls
+        ``select(carry_leaves, path=path)`` where ``path`` is the stable
+        node-address string (e.g. ``"scan[0]"``).  Inspected once at
+        ``verbose()`` call time — no per-step overhead.  Back-compat:
+        single-argument selectors unchanged.
     ops:
         Which control-flow operators to tap.  Accepted values: ``"scan"``,
         ``"while_loop"``.  Default: both.
@@ -559,16 +612,17 @@ def verbose(
 
     Notes
     -----
-    **Carry boundary**: jaxprs are flat — pytree structure of the carry is erased
-    by tracing and is NOT recoverable from the scan equation.  When ``select`` is
-    ``None``, ``TapEvent.value`` is a *flat tuple of carry leaves* (not the
-    original pytree).  Use ``select`` to reshape them into the desired structure::
+    **Carry boundary & pytree erasure**: Jaxprs are flat — tracing erases the
+    carry's pytree structure and it is NOT recoverable from the scan equation.
+    When ``select`` is ``None``, ``TapEvent.value`` is a *flat tuple of carry
+    leaves* (not the original pytree). Use ``select`` to reshape them::
 
+        # If carry is {"a": x, "b": y} (2 leaves), select receives (x, y)
         tap.verbose(f, on_step=cb, select=lambda leaves: {"a": leaves[0], "b": leaves[1]})
 
-    The ``select`` function receives the tuple of carry leaves and its return value
-    is delivered to the host with its pytree structure preserved via trace-time
-    treedef capture.
+    The ``select`` function receives the flat leaf tuple and returns any
+    pytree, which is captured at trace time and reconstructed on the host
+    side with its structure intact.
     """
     if sample_every < 1:
         raise ValueError(f"sample_every must be >= 1, got {sample_every}")
@@ -938,6 +992,21 @@ def watch_nan(
     Returns
     -------
     PrimitiveTap
+
+    Examples
+    --------
+    Watch for NaN/Inf in cholesky outputs::
+
+        spec = tap.watch_nan("cholesky")
+        with tap.record(taps=[spec]) as rec:
+            result = jnp.linalg.cholesky(matrix)
+        # Alerts to stderr if any NaN or Inf appears in cholesky output
+
+    Watch a single output from a multi-output primitive::
+
+        # For eigh which returns (eigenvalues, eigenvectors),
+        # watch only the eigenvalues (output=0 in primitive order)
+        spec = tap.watch_nan("eigh", output=0)
     """
     if output is not None:
         # Single-array mode: select receives one array, not a tuple.
@@ -1027,11 +1096,19 @@ def print(  # noqa: A001 — intentionally shadows builtin; internal code uses s
 
     Examples
     --------
-    ::
+    Print primitive outputs for debugging::
 
         with tap.record(taps=[tap.print("dot_general")]) as rec:
             result = model(x)
-        # [tap] scan[0]/jit[0]/dot_general[0] 3/25: array([[0.1, ...]])
+        # stderr: [tap] scan[0]/jit[0]/dot_general[0] 3/25: array([[0.1, ...]])
+
+    Print only the first fire::
+
+        spec = tap.print("cholesky", once=True)
+        with tap.record(taps=[spec]) as rec:
+            for _ in range(10):
+                result = jnp.linalg.cholesky(matrix)
+        # stderr prints only on iteration 0, suppressed for iterations 1-9
     """
     return PrimitiveTap(
         prim_name=prim_name,
@@ -1108,13 +1185,21 @@ def primitives(f: Callable, *args: Any) -> "dict[str, int]":
 
     Examples
     --------
-    ::
+    Discover primitives in a computation::
 
-        tap.primitives(run, log_step0)
-        # {'scan': 1, 'cholesky': 1, 'integer_pow': 1, ...}
+        def model(x):
+            def body(carry, _):
+                return jnp.linalg.cholesky(carry)
+            return lax.scan(body, x, jnp.arange(5))[0]
 
-        # Pass the name directly to tap.on():
-        tap.watch_nan("cholesky")
+        prims = tap.primitives(model, jnp.eye(2))
+        # Returns: {'scan': 1, 'cholesky': 5, 'integer_pow': 1, ...}
+
+    Use the discovered names with ``tap.on()``::
+
+        spec = tap.on("cholesky", alert=lambda ok: not ok)
+        with tap.record(taps=[spec]) as rec:
+            result = model(jnp.eye(2))
     """
     closed = jax.make_jaxpr(f)(*args)
     counts: dict[str, int] = {}
@@ -1130,15 +1215,32 @@ def primitives(f: Callable, *args: Any) -> "dict[str, int]":
 def emergency_restore() -> None:
     """Restore ``jax.lax.scan`` / ``jax.lax.while_loop`` to session-captured originals.
 
-    For recovering a corrupted interactive session — e.g. after a crash inside a
-    ``tap.record()`` block or an interrupted kernel.
+    Use this function to recover a corrupted interactive session after a crash
+    inside a ``tap.record()`` context manager or an interrupted kernel that
+    left jax-tap's monkeypatch in place.
 
-    If our patch is on top, restores to the pre-session value (or the import-time
-    original when none was captured), clears the registry, and resets session state.
-    If a foreign patch is on top, warns and leaves it alone but still clears our
-    internal state.
+    Behavior:
 
-    Well-behaved code using ``with tap.record():`` never needs this.
+    - If jax-tap's patch is on top: restores the original implementations,
+      clears the event registry, and resets all session state.
+    - If a foreign patch is on top: warns but leaves it alone; still clears
+      jax-tap's internal state.
+
+    Notes
+    -----
+    Well-behaved code using ``with tap.record():`` (context manager form) never
+    needs this — the context manager ensures cleanup on ``__exit__``, even after
+    exceptions.  This is a recovery tool for interactive debugging only.
+
+    Examples
+    --------
+    Restore after an interrupted session::
+
+        # Your kernel crashed inside tap.record(); JAX is now patched.
+        # In a new cell:
+        import jaxtap as tap
+        tap.emergency_restore()
+        # jax.lax.scan and jax.lax.while_loop are now unpatched
     """
     from ._ashell import emergency_restore as _er
 
