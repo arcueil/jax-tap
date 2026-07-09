@@ -96,6 +96,49 @@ rec.df()                                             # path | step | c
 tap.verbose(f, on_step=cb, sample_every=100, max_depth=1, where=lambda p: "while" in p)
 ```
 
+## How `select` works
+
+`select` is the device-side half of your print statement; `on_step` is the host-side half.
+
+**Input**: the flat tuple of carry leaves returned by the loop body on each iteration.
+**Output**: any pytree; its structure is preserved to the host.
+
+The `select` function runs inside the traced program (on-device) to minimize what crosses the host boundary. Here is the intuition ladder with five one-line examples:
+
+```python
+# 1. select=None (default): full carry leaf tuple crosses host
+g = tap.verbose(f, on_step=lambda e: print(e.value))
+#   → TapEvent.value = (carry_leaf_0, carry_leaf_1, ...)
+
+# 2. select one leaf: only e.g. the position vector
+select=lambda leaves: leaves[0]
+#   → TapEvent.value = array(...)
+
+# 3. select with structure: build a dict on-device with computation
+select=lambda leaves: {"pos": leaves[0], "sin_pos": jnp.sin(leaves[0])}
+#   → TapEvent.value = {"pos": ..., "sin_pos": ...}
+
+# 4. select with reduction: check finiteness before crossing
+select=lambda leaves: jnp.isfinite(leaves[0]).all()
+#   → TapEvent.value = True or False (one bool crosses host)
+
+# 5. select with empty payload: progress idiom (step index only)
+select=lambda _: ()
+#   → TapEvent.value = ()  (nothing crosses host except step counter)
+```
+
+**Two traced consequences**:
+
+1. **JAX-traceable only**: `select` must be traced-compatible (numpy operations only, no host-side Python logic).
+2. **Gated by `sample_every`**: unsampled steps pay zero cost — the `select` function is never called on skipped steps.
+
+Path-aware select (optional): if your `select` accepts a keyword argument named `path` or is a 2-parameter function, jaxtap passes the stable node address at call time (inspected once at trace time, zero per-step overhead):
+
+```python
+select=lambda leaves, *, path: {"node": path, "value": leaves[0]}
+#   → TapEvent.value = {"node": "scan[0]", "value": ...}
+```
+
 ## The debugging toolkit
 
 jax-tap ships four ergonomic helpers for the most common debugging patterns.
@@ -195,49 +238,74 @@ If a session crashes inside a `tap.record()` block, the monkey-patched
 `jax.lax.scan` and `jax.lax.while_loop` may not be restored. Call
 `tap.emergency_restore()` to reset the library state to a clean slate.
 
-## Progress bar in four lines
+## Progress recipes
 
 jax-tap ships no display frontends — display is the consumer's responsibility.
-To add a progress bar, wire a simple `on_step` callback that updates your bar
-when the enclosing loop fires:
+
+### Simple progress bar (semi-production baseline)
+
+The progress idiom (`select=lambda _: ()`) costs the least: only the step counter crosses the host boundary, zero bytes of carry data.
 
 ```python
 from tqdm import tqdm
 bar = tqdm(total=1000)
-with tap.record(on_step=lambda e: e.path == "scan[0]" and bar.update(10), sample_every=10):
-    run(...)
+with tap.record(on_step=lambda e: e.path == "scan[0]" and bar.update(10),
+                sample_every=10, select=lambda _: ()):
+    result = run(...)
+bar.close()
 ```
 
-The `sample_every=` parameter is your rate-limiting knob: pass it to `tap.record()`
-to emit events only every *k* steps, reducing host-boundary traffic if your loop is
-very tight.  At `se=10` the callback cost amortises to ~1 µs/step — this is the
-semi-production baseline per the overhead benchmark (see `bench/README.md`).
-`PrimitiveTap` callbacks are gated by the same `sample_every` when inside a loop.
+**Overhead**: at `sample_every=10` on a ~100 µs body, this costs ≈ **+6%**. At `sample_every=100`, overhead drops to **≈ +1%** (see the recommendation ladder in `bench/README.md` for other body sizes).
 
-## demo/ — real bugs, re-run against the tap promise
+### Semantic progress (unbounded loop)
 
-`demo/` holds one runnable file per real bug from our own history (silent
-float32 Cholesky NaNs, adaptation metrics that never moved, inner loops that
-quit early, ...) — each shows the silent symptom, then jax-tap localizing it.
-Start with `demo/cholesky_float32_trap.py`.
+For an unbounded `while_loop`, the loop has no known total — but the *carry itself* can encode progress. Here, a tempering exponent drives the loop and doubles as a progress fraction:
+
+```python
+def bar(e):
+    lam = float(e.value)  # the carry's tempering parameter, 0 to 1
+    n = int(lam * 40)
+    sys.stderr.write(f"\rtempering [{'#'*n}{'.'*(40-n)}] {lam*100:5.1f}%")
+
+with tap.record(select=lambda leaves: leaves[0], on_step=bar):
+    result = sampler(...)  # unbounded while_loop, unmodified
+```
+
+This pattern requires no total or manual step accounting — the tap streams the carry value that IS the progress metric. See `proofs/semantic-progress/semantic_progress.py` for a live example.
+
+## What the first call tells you
+
+The first call to a jitted function pays trace + compile + execute in one opaque wall-time block. Naive profiling attributes it all to compilation — but **the first tap event's arrival timestamp IS the compile/execute boundary**.
+
+From a single first call, measure *true* compile cost (trace + compile) separately from execution cost, giving you a free steady-state runtime forecast before ever running the compiled program again. This is the "compile split" capability; see `demo/async_dispatch_compile_blowup.py` for a worked example (7-demo in the suggested reading order).
+
+## demo/ — Learn by example
+
+**demo/ is the primary documentation.** It holds nine runnable files demonstrating real bugs from our own history (silent float32 Cholesky NaNs, adaptation metrics that never moved, inner loops that quit early, ...) — each shows the silent symptom, then jax-tap localizing it. A suggested reading order and context are in `demo/README.md`.
+
+The flagship: `demo/blackjax_warmup_telemetry.py` instruments a real BlackJAX warmup unmodified, streaming its step size and mass matrix as the algorithm adapts — no changes to BlackJAX, zero logging code in the warmup itself.
 
 ## Status
 
-Pre-release; not yet on PyPI. The foundation (jaxpr-walker core, tap-spec
-layer, collectors) is built and has passed a 2-arm adversarial review
-(numerics: zero corruption found; structure: both findings fixed and
-re-reviewed — evidence frozen under `proofs/`).
+Pre-release; not yet on PyPI. The core library has passed 2-arm adversarial review with full remediation (B-core numerics, A-shell lifecycle) and GPU validation (CUDA 13, RTX 5090).
 
-| Milestone | Scope | State |
+| Component | Scope | State |
 |-----------|-------|-------|
-| M0 | jaxpr-walker core (`tap.verbose`) | ✅ merged |
-| M2 | tap specs (`sample_every`/`where`/`max_depth`) + collectors (`record`, `.df()`, JSONL) | ✅ merged |
-| B-core review | 2-arm adversarial review + remediation | ✅ merged |
-| M1a | primitive taps (`tap.on("cholesky", ...)`) | ✅ merged |
-| M1b | the `with tap.record():` context form | ✅ merged |
-| A-shell review | adversarial review of A-form context-manager semantics | ✅ merged |
-| M1c | alert sugar (`watch_nan`, `tap.print`, `output=`, `once=`) | ✅ merged |
-| M3/M4/M5 | conformance suite · demos · docs | queued |
+| Core | jaxpr-walker transform + tap specs | ✅ shipped |
+| Taps | carry/primitive/alert/discovery helpers | ✅ shipped |
+| Collectors | in-memory recorder, JSONL, `.df()` | ✅ shipped |
+| Reviews | 2-arm adversarial (B-core + A-shell) + remediation | ✅ completed |
+| GPU validation | CUDA 13, RTX 5090, full suite + demos | ✅ validated |
+| Demos | 10 runnable bug reproductions | ✅ completed |
+| Benchmarks | overhead profiling + recommendation ladder | ✅ completed |
+| Docs | README + docstrings + demo reading order | ✅ completed |
+| Conformance suite | edge-case coverage (deferred milestone) | 🔄 in progress |
+| Release gate | GPU validation on release branch | pending |
+| PyPI | package distribution | pending |
+
+## Known boundaries
+
+See `CHANGELOG.md` under "Known boundaries" for the complete documented list. In brief: `vmap×while_loop` includes masked lanes; taps riding `grad` observe the forward pass only (tap the differentiated function to observe backward); trace-time config travels with compiled artifacts on cache hits (host routing is live); the jit re-wrap does not thread donation/shardings.
 
 ## Naming
 
