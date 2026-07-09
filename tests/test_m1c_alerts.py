@@ -8,16 +8,11 @@ Run with: uv run pytest tests/test_m1c_alerts.py -v
 
 from __future__ import annotations
 
-import io
-import sys
-import warnings
-
 import jax
 import jax.numpy as jnp
 import jaxtap as tap
 import numpy as np
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -114,7 +109,9 @@ def test_total_prim_tap_outside_loop():
 
     chol_events = [e for e in events if "cholesky" in e.path]
     assert len(chol_events) == 1
-    assert chol_events[0].total is None, f"outside-loop total must be None, got {chol_events[0].total}"
+    assert (
+        chol_events[0].total is None
+    ), f"outside-loop total must be None, got {chol_events[0].total}"
 
 
 def test_total_prim_tap_while_body():
@@ -148,17 +145,6 @@ def test_total_prim_tap_while_body():
 # ---------------------------------------------------------------------------
 
 
-def _capture_alert(f, *args, taps):
-    """Run tap.verbose(f, taps=taps) and capture stderr."""
-    buf = io.StringIO()
-    events: list[tap.TapEvent] = []
-    got = tap.verbose(f, on_step=lambda e: events.append(e), taps=taps)(*args)
-    jax.block_until_ready(got)
-    # Replay events through _fire_alert to capture prints
-    # (jax.debug.callback fires async; capture via subprocess or redirect at call site)
-    return got, events
-
-
 def test_alert_fires_terse_line(capsys):
     """alert=... emits exactly one [tap] FAIL line per firing event to stderr."""
     N = 10
@@ -187,7 +173,9 @@ def test_alert_fires_terse_line(capsys):
 
     # At least one alert line must appear (first non-finite step)
     alert_lines = [ln for ln in stderr_lines if ln.startswith("[tap] FAIL")]
-    assert len(alert_lines) > 0, f"expected at least one [tap] FAIL line; got stderr: {captured.err!r}"
+    assert (
+        len(alert_lines) > 0
+    ), f"expected at least one [tap] FAIL line; got stderr: {captured.err!r}"
 
     # Format check: [tap] FAIL {path} {step}/{total}: {label}
     for ln in alert_lines:
@@ -223,7 +211,9 @@ def test_alert_silent_when_finite(capsys):
 
     captured = capsys.readouterr()
     alert_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")]
-    assert len(alert_lines) == 0, f"expected 0 alert lines for always-False predicate; got: {captured.err!r}"
+    assert (
+        len(alert_lines) == 0
+    ), f"expected 0 alert lines for always-False predicate; got: {captured.err!r}"
 
     # on_step still receives every event
     assert len([e for e in events if e.path == "scan[0]"]) == N
@@ -260,9 +250,9 @@ def test_alert_independent_of_on_step(capsys):
     alert_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")]
     # alert fires only for non-finite ones (f32 breaks at step ~7)
     non_finite_count = sum(1 for e in chol_events if not bool(e.value))
-    assert len(alert_lines) == non_finite_count, (
-        f"expected {non_finite_count} alert lines, got {len(alert_lines)}"
-    )
+    assert (
+        len(alert_lines) == non_finite_count
+    ), f"expected {non_finite_count} alert lines, got {len(alert_lines)}"
 
 
 def test_alert_raising_predicate_warn_once():
@@ -373,9 +363,9 @@ def test_watch_nan_catches_nan_in_f32(capsys):
     assert "NaN/Inf" in alert_lines[0], f"expected 'NaN/Inf' label in {alert_lines[0]!r}"
     # total should be the scan length
     step_total = alert_lines[0].split()[3]  # "7/25:"
-    assert step_total.endswith(f"/{N}:") or step_total == f"{first_bad}/{N}:", (
-        f"expected step/{N}: in {step_total!r}"
-    )
+    assert (
+        step_total.endswith(f"/{N}:") or step_total == f"{first_bad}/{N}:"
+    ), f"expected step/{N}: in {step_total!r}"
 
 
 def test_watch_nan_silent_when_finite(capsys):
