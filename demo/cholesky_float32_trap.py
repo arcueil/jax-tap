@@ -28,9 +28,9 @@ def make_sampler(n_steps: int):
         c = 1.0 - 10.0 ** (-jnp.minimum(k, 12.0))
         M = jnp.array([[1.0, c], [c, 1.0]], dtype=c.dtype)
         L = jnp.linalg.cholesky(M)  # <-- BUG LIVES HERE: silently non-finite in f32
-        # jax-tap's tap.watch_nan("cholesky") acts AS IF we injected
-        #   `if not isfinite(L).all(): print(step, "NaN/Inf")`
-        # right here — without editing this function.
+        # ╔═ jax-tap virtual injection ═══════════════════════════════════╗
+        # ║ if not isfinite(L).all(): print(step, "NaN/Inf")               ║
+        # ╚═ fires as if written HERE — this function is never edited ═════╝
         logdens = -0.5 * 2.0 * jnp.sum(jnp.log(jnp.diag(L)))
         new_log_step = jnp.where(jnp.isfinite(logdens), log_step + 0.05, log_step - 1.0)
         return (new_log_step, k + 1.0), logdens
