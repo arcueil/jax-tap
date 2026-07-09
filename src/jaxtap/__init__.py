@@ -618,7 +618,7 @@ def verbose(
                 def _host(step_: Any, *flat_vals: Any) -> None:
                     value = jax.tree_util.tree_unflatten(sel_tree, list(flat_vals))
                     event = TapEvent(
-                        path=path, step=int(step_), value=value, total=total
+                        path=path, step=step_.item(), value=value, total=total
                     )
                     # alert fires BEFORE on_step; both are independent.
                     if alert is not None:
@@ -637,7 +637,7 @@ def verbose(
             ) -> None:
                 def _host(step_: Any, *leaves: Any) -> None:
                     event = TapEvent(
-                        path=path, step=int(step_), value=leaves, total=total
+                        path=path, step=step_.item(), value=leaves, total=total
                     )
                     # alert fires BEFORE on_step; both are independent.
                     if alert is not None:
@@ -727,7 +727,7 @@ def verbose(
 
             def _host(step_: Any, *flat_vals: Any) -> None:
                 value = jax.tree_util.tree_unflatten(sel_tree, list(flat_vals))
-                event = TapEvent(path=path, step=int(step_), value=value, total=total)
+                event = TapEvent(path=path, step=step_.item(), value=value, total=total)
                 if on_step is not None:
                     _guard(on_step, event)
                 if _spec.alert is not None:
