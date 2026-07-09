@@ -23,7 +23,7 @@ packages = ["src/jaxtap"]
 pandas = ["pandas"]
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "ruff", "mypy", "pre-commit"]
 
 [tool.ruff]
 line-length = 100
@@ -33,6 +33,12 @@ exclude = ["proofs/"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src"]
+ignore_missing_imports = true
+warn_unused_ignores = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

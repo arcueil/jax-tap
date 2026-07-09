@@ -1,3 +1,17 @@
+# Copyright 2026 The jax-tap Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 Scan and while_loop rewrite functions for the B-core walker.
 
@@ -89,7 +103,7 @@ def rewrite_scan(
     # correct TapEvent.total (the enclosing scan's length).
     total: int = p["length"]
 
-    def body_fn(carry_step, x):
+    def body_fn(carry_step: Any, x: Any) -> Any:
         carry, step = carry_step
         # x arrives with the same pytree structure as xs.
         # Unpack into a flat list for the jaxpr body call.
@@ -164,12 +178,12 @@ def rewrite_while(
     bconsts = invals[cn : cn + bn]
     init = invals[cn + bn :]
 
-    def cond_fn(carry_step):
+    def cond_fn(carry_step: Any) -> Any:
         carry, _ = carry_step
         (pred,) = jax.core.eval_jaxpr(cj.jaxpr, cj.consts, *cconsts, *carry)
         return pred
 
-    def body_fn(carry_step):
+    def body_fn(carry_step: Any) -> Any:
         carry, step = carry_step
         # Pass the live step as the 7th argument, None as the 8th (total), and
         # True as the 9th (_in_loop override) so _interp gates primitive taps

@@ -1,3 +1,17 @@
+# Copyright 2026 The jax-tap Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 jaxtap — zero-code-change runtime telemetry for JAX control flow.
 
@@ -511,7 +525,7 @@ def verbose(
         # captured in the closure.
         def _base_tap_cb(
             path: str, step: Any, *carry_leaves: Any, total: "int | None" = None
-        ) -> None:  # type: ignore[misc]
+        ) -> None:
             def _host(step_: Any, *leaves: Any) -> None:
                 _guard(on_step, TapEvent(path=path, step=int(step_), value=leaves, total=total))
 
@@ -565,7 +579,7 @@ def verbose(
             spec: PrimitiveTap,
             total: "int | None" = None,
             _in_loop: bool = False,
-        ) -> None:  # type: ignore[misc]
+        ) -> None:
             # Apply output index selection first (trace-time bounds check).
             if spec.output is not None:
                 k = spec.output
@@ -731,7 +745,7 @@ def record(
 
         effective_on_step: Callable[[TapEvent], None] = _combined
     else:
-        effective_on_step = recorder  # type: ignore[assignment]
+        effective_on_step = recorder
 
     tapped = verbose(
         f,
@@ -806,7 +820,7 @@ def watch_nan(
                 pass
             return jnp.bool_(True)
 
-        select_fn = _select_finite_single
+        select_fn: Callable[..., Any] = _select_finite_single
     else:
         # Tuple mode: select receives the full output tuple.
         def _select_finite_tuple(outs: tuple) -> Any:
