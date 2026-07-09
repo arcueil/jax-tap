@@ -63,8 +63,20 @@ def main() -> None:
           f"{'SILENT (forward is clean; the tap CANNOT see this bug)' if fwd_silent else 'fired?!'}")
 
     # ---------------- act 2: the escape hatch ----------------
-    # grad(loss) is just a function; its jaxpr contains the backward pass as
-    # ordinary primitives. Tap the division at the 0/0 site:
+    # How this works, end to end (the backend in 4 steps):
+    #  1. jax.grad(loss) is an ordinary function. By the time jax-tap traces
+    #     it, the AD transform has ALREADY run — its jaxpr contains forward
+    #     AND backward as plain primitives (div, mul, ...). Nothing is
+    #     "inside autodiff" anymore; the backward pass is just code.
+    #  2. The walker rebuilds that program and attaches watch_nan("div") to
+    #     every div site, each with an address (scan[0]/div[0], ...).
+    #  3. DEVICE, per firing: all-isfinite(div output) reduces to ONE bool
+    #     and ships to the host; once=True arms the alert to fire at most
+    #     once per run.
+    #  4. HOST: the first non-finite div prints the [tap] FAIL line — the
+    #     0/0 caught at its birth site (path scan[0]/div[0], step 0).
+    # Contrast with act 1: there the tap rode ALONG loss() and saw only its
+    # forward pass; here the tap wraps the differentiated program itself.
     caught = io.StringIO()
     with redirect_stderr(caught):
         jax.block_until_ready(tap.verbose(jax.grad(loss), on_step=lambda e: None,
