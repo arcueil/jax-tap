@@ -114,12 +114,19 @@ M1d FIX 2: primitive taps fire inside EVERY descended body, including loops
 filtered by ``ops``/``where``/``max_depth`` — the filter controls carry-tap
 emission only; the body is always recursed.
 
-Known v1 boundaries (not fixed here, documented)
--------------------------------------------------
-A1 — vmap(while_loop): ``while_loop`` inside a ``vmap`` emits ghost events
-     (one per vmap lane in addition to the real ones) because the vmap
-     transformation copies the body trace.  This is inherent to how JAX's
-     vmap-while interacts with ``jax.debug.callback``.
+Known boundaries and mitigations
+---------------------------------
+A1 — vmap(while_loop) carry taps: MITIGATED in fix/a1-cond-gating arc.
+     ``rewrite_while`` now re-evaluates the cond_jaxpr on the pre-body carry
+     to get a per-lane active mask; ghost carry-tap events (from lanes that
+     have already finished) are silently dropped host-side before TapEvent
+     construction — so ``on_step`` and ``alert`` see only real per-lane steps.
+     Residual: primitive taps (``taps=``) inside vmapped while bodies still
+     ghost-fire; the active mask is not threaded into ``prim_tap_fn``.
+     Extending the mask to prim taps is a future arc.
+     Overhead: the extra cond_jaxpr eval adds ~13 µs/iter unconditionally for
+     all while_loop tapping (vmapped or not); expensive convergence-check conds
+     add ~3-7 µs/iter on top (measured, bench/while_cond_overhead.py).
 
 A3 — remat + grad double-fire: a scan inside a ``jax.checkpoint`` region fires
      its tap once on the forward pass and once on the backward pass (remat

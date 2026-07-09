@@ -588,3 +588,187 @@ def test_while_prim_tap_gated():
         f"expected 3 sin events (steps 0,10,20 with se=10, 25 iters); "
         f"got {len(sin_events)}, steps={sorted(e.step for e in sin_events)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# A1 mitigation: vmap(while_loop) ghost-event suppression
+#
+# Ports proofs/bcore-review/arm-a/vmap_while.py and
+# proofs/bcore-review/arm-a/vmap_while_hardened.py.
+#
+# Under vmap+while_loop, JAX runs max(trip_counts) joint iterations for all
+# lanes.  Before A1 mitigation, debug.callback fired for ghost iterations
+# (lanes already finished), delivering fabricated carry values to the host.
+# After mitigation: carry taps emit only for active lanes (cond was True on
+# the pre-body carry); ghost iterations are silently dropped before TapEvent
+# construction.  Prim taps inside the body still ghost-fire — see
+# test_vmap_while_prim_tap_residual_ghost below.
+# ---------------------------------------------------------------------------
+
+# Shared setup: 3 lanes, trip counts 10, 5, 1 → 16 real carry-tap events.
+# max(10, 5, 1) = 10 joint iterations × 3 lanes = 30 raw callback fires.
+# Mitigation should deliver exactly 16 to on_step.
+_LIM = jnp.float32(10.0)
+_V0 = jnp.array([0.0, 5.0, 9.0], dtype=jnp.float32)
+_EXPECTED_REAL = 10 + 5 + 1  # 16
+
+
+def _vmap_while_f(v0):
+    """A single-scalar while_loop; when vmapped gives per-lane trip counts."""
+    return jax.lax.while_loop(lambda c: c < _LIM, lambda c: c + jnp.float32(1.0), v0)
+
+
+def test_vmap_while_carry_ghost_suppression():
+    """After A1 mitigation, vmap+while carry taps fire exactly once per REAL step.
+
+    3 lanes with trip counts 10, 5, 1 → exactly 16 carry-tap events, not 30.
+    Output is bitwise identical to the untapped reference.
+
+    Ports proofs/bcore-review/arm-a/vmap_while.py.
+    """
+    ref = jax.vmap(_vmap_while_f)(_V0)
+
+    events: list = []
+    got = jax.vmap(tap.verbose(_vmap_while_f, on_step=events.append))(_V0)
+    jax.block_until_ready(got)
+
+    assert _bw(ref, got), "vmap+while A1: output not bitwise identical"
+
+    while_events = [e for e in events if e.path == "while[0]"]
+    assert len(while_events) == _EXPECTED_REAL, (
+        f"A1 ghost suppression: expected {_EXPECTED_REAL} carry-tap events, "
+        f"got {len(while_events)} (30 = 10 joint iters × 3 lanes before mitigation)"
+    )
+
+
+def test_vmap_while_carry_no_fabricated_values():
+    """After A1 mitigation, no impossible (fabricated) carry values reach on_step.
+
+    Lane 0 counts 0→10, lane 1 counts 5→10, lane 2 counts 9→10.
+    Any counter value > 10.0 is impossible in the real per-lane computation.
+
+    Ports proofs/bcore-review/arm-a/vmap_while_hardened.py.
+    """
+    events: list = []
+    got = jax.vmap(tap.verbose(_vmap_while_f, on_step=events.append))(_V0)
+    jax.block_until_ready(got)
+
+    while_events = [e for e in events if e.path == "while[0]"]
+    counter_vals = [float(np.asarray(e.value[0])) for e in while_events]
+    fabricated = [v for v in counter_vals if v > float(_LIM)]
+    assert not fabricated, (
+        f"A1 ghost suppression: fabricated counter values > LIM delivered: {fabricated}"
+    )
+
+
+def test_vmap_while_carry_ghost_suppression_with_select():
+    """A1 mitigation works through the select= path.
+
+    Applies select=lambda leaves: leaves[0] so the host receives the counter
+    directly.  Ghost suppression must apply in the select branch too.
+    """
+    ref = jax.vmap(_vmap_while_f)(_V0)
+
+    events: list = []
+    got = jax.vmap(
+        tap.verbose(
+            _vmap_while_f, on_step=events.append, select=lambda leaves: leaves[0]
+        )
+    )(_V0)
+    jax.block_until_ready(got)
+
+    assert _bw(ref, got), "vmap+while A1 (select): output not bitwise identical"
+    while_events = [e for e in events if e.path == "while[0]"]
+    assert len(while_events) == _EXPECTED_REAL, (
+        f"A1 ghost suppression (select): expected {_EXPECTED_REAL} events, "
+        f"got {len(while_events)}"
+    )
+    fabricated = [
+        float(np.asarray(e.value))
+        for e in while_events
+        if float(np.asarray(e.value)) > float(_LIM)
+    ]
+    assert not fabricated, f"A1 (select): fabricated values: {fabricated}"
+
+
+def test_vmap_while_alert_no_ghost_alerts():
+    """A1 ghost drop must happen BEFORE alert evaluation.
+
+    An alert that triggers only on ghost-only values (counter > LIM) must
+    fire zero times after the mitigation.  Before the fix it would fire once
+    per ghost event (false alarms on stale carry).
+
+    Rider #3 regression: ghost events must never reach alert= or on_step.
+    """
+    import io
+    import sys
+
+    events: list = []
+    alert_fires: list = []
+
+    def alert_fn(event):
+        val = float(np.asarray(event.value[0]))
+        if val > float(_LIM):
+            alert_fires.append(val)
+            return f"ghost! val={val}"
+        return False
+
+    stderr_buf = io.StringIO()
+    old_stderr = sys.stderr
+    sys.stderr = stderr_buf
+    try:
+        got = jax.vmap(
+            tap.verbose(_vmap_while_f, on_step=events.append, alert=alert_fn)
+        )(_V0)
+        jax.block_until_ready(got)
+    finally:
+        sys.stderr = old_stderr
+
+    fail_lines = [ln for ln in stderr_buf.getvalue().splitlines() if "FAIL" in ln]
+
+    assert not alert_fires, (
+        f"A1: alert fired on ghost values (should be 0 fires): {alert_fires}"
+    )
+    assert not fail_lines, (
+        f"A1: ghost FAIL lines emitted to stderr (should be 0): {fail_lines}"
+    )
+    while_events = [e for e in events if e.path == "while[0]"]
+    assert len(while_events) == _EXPECTED_REAL, (
+        f"A1 alert test: expected {_EXPECTED_REAL} on_step events, got {len(while_events)}"
+    )
+
+
+def test_vmap_while_prim_tap_residual_ghost():
+    """Primitive taps inside a vmapped while body STILL ghost-fire (known boundary).
+
+    The A1 mitigation applies to CARRY TAPS only.  Primitive taps inside the
+    while body do not receive the active mask and therefore still fire for
+    ghost iterations under vmap.  This test documents and freezes the current
+    known behaviour (documented boundary — extend to prim taps in a future arc).
+
+    With 3 lanes (trip counts 10, 5, 1) and a prim tap on the 'add' inside the
+    body, the raw while_loop fires 10 joint iterations × 3 lanes = 30 prim-tap
+    events.  Carry taps are still correctly limited to 16.
+    """
+    events: list = []
+    got = jax.vmap(
+        tap.verbose(
+            _vmap_while_f,
+            on_step=events.append,
+            taps=[tap.on("add")],
+        )
+    )(_V0)
+    jax.block_until_ready(got)
+
+    carry_events = [e for e in events if e.path == "while[0]"]
+    prim_events = [e for e in events if "add" in e.path]
+
+    assert len(carry_events) == _EXPECTED_REAL, (
+        f"carry taps: expected {_EXPECTED_REAL}, got {len(carry_events)}"
+    )
+    # Prim taps still ghost-fire: the count should be > _EXPECTED_REAL.
+    # Exact count depends on JAX internals; we just assert it is MORE than 16.
+    assert len(prim_events) > _EXPECTED_REAL, (
+        f"prim taps expected to ghost-fire (>16 events) but got {len(prim_events)}; "
+        "this test documents the known A1 residual boundary for prim taps"
+    )

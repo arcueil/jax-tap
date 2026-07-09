@@ -9,7 +9,7 @@ One row per attack/probe script across all corpora.
 - `N/A: <reason>` — not applicable (blackjax display thread, superseded API, etc.)
 
 **Conformance test files (both verified passing):**
-- `tests/conformance/test_bcore_conformance.py` — 20 tests, B-core lane (bcore-review + m1a/m1d-ays)
+- `tests/conformance/test_bcore_conformance.py` — 25 tests, B-core lane (bcore-review + m1a/m1d-ays + A1 mitigation)
 - `tests/conformance/test_ashell_conformance.py` — 14 tests, A-shell lane (ashell-review arm-s/arm-l)
 
 **Note on attack-ledger-964:** All 53 scripts in arm-a and arm-b targeted the blackjax progress-bar
@@ -99,8 +99,8 @@ blackjax-specific mechanics.
 | `remat.py` | checkpoint(verbose(f)) double-fire under grad; verbose(checkpoint(f)) events | `covered: tests/test_jaxtap.py::test_checkpoint_grad_bitwise`, `test_scan_in_checkpoint_f1` |
 | `reverse_and_cond.py` | reverse=True scan + cond under verbose() | `covered: tests/test_jaxtap.py::test_scan_in_cond_f1` (cond); reverse covered by `test_carry_leaves_contract` |
 | `vmap_select.py` | nested vmap(vmap(verbose)), batched carry only, batched xs only, vmap(grad), lossy select, holomorphic grad | `covered: tests/test_jaxtap.py::test_vmap_safety`, `test_select_reduce_on_device`, `test_grad_through_transform` |
-| `vmap_while.py` | vmap over while_loop with per-lane trip counts → ghost events | `documented-boundary`: vmap+while ghost events are inherent to `jax.lax.while_loop` batching semantics (A1 — confirmed INHERENT by `proofs/bcore-review/ays/ays_a1_baseline.py` raw-callback baseline) |
-| `vmap_while_hardened.py` | hardened vmap+while handling | `documented-boundary`: same as `vmap_while.py` — A1 inherent boundary |
+| `vmap_while.py` | vmap over while_loop with per-lane trip counts → ghost events | `ported: tests/conformance/test_bcore_conformance.py::test_vmap_while_carry_ghost_suppression` — A1 mitigation: carry taps now emit exactly per-lane real steps (16, not 30 for the 3-lane example). Prim taps inside the body still ghost-fire (residual boundary — see `test_vmap_while_prim_tap_residual_ghost`). |
+| `vmap_while_hardened.py` | hardened vmap+while handling: determinism + fabricated-value detection | `ported: tests/conformance/test_bcore_conformance.py::test_vmap_while_carry_no_fabricated_values`, `test_vmap_while_carry_ghost_suppression_with_select`, `test_vmap_while_alert_no_ghost_alerts` — fabricated values (counter > LIM) no longer reach on_step or alert. Ghost-drop precedes TapEvent construction so alert= never fires on ghost events. |
 
 ## proofs/bcore-review/arm-b/ — B-core attack arm B (verbose() composition)
 
@@ -121,9 +121,9 @@ blackjax-specific mechanics.
 
 | source script | what it attacks | disposition |
 |---|---|---|
-| `ays_a1_baseline.py` | raw jax.debug.callback baseline under vmap+while (is A1 inherent?) | `documented-boundary`: confirms A1 ghost events are INHERENT to vmap+while+debug.callback, not a jaxtap defect |
-| `ays_a2a3_round2.py` | round-2 AYS on direction + vmap semantic | `documented-boundary`: confirms vmap-while ghost events are inherent; see A1 baseline |
-| `ays_a2_fix_direction.py` | fix direction AYS probe | `documented-boundary`: confirms A1 boundary direction |
+| `ays_a1_baseline.py` | raw jax.debug.callback baseline under vmap+while (is A1 inherent?) | `documented-boundary`: confirms A1 ghost events are INHERENT to vmap+while+debug.callback. jaxtap now mitigates for CARRY TAPS by re-evaluating cond inside body_fn and filtering ghosts host-side. Raw baseline (no jaxtap) still over-fires — unchanged. |
+| `ays_a2a3_round2.py` | round-2 AYS on direction + vmap semantic; A1 mitigation feasibility | `ported (partial)`: confirms the mitigation design (cond predicate evaluable per-lane on carry → active mask). A1 mitigation now implemented; see `test_vmap_while_carry_ghost_suppression`. |
+| `ays_a2_fix_direction.py` | fix direction AYS probe | `documented-boundary`: confirms A1 boundary direction; mitigation implemented in fix/a1-cond-gating arc. |
 | `ays_m2_sample_vmap.py` | M2 sample_every under vmap | `covered: tests/test_jaxtap.py::test_vmap_safety`; sample_every gating under vmap is `documented-boundary` for scalar prim taps (single-fire per batch step, see `proofs/m1d-ays/ays_m1d_r2.py`) |
 
 ## proofs/bcore-review/fix-review/ — B-core fix-review checks
@@ -253,14 +253,19 @@ blackjax-specific mechanics.
 | disposition | count |
 |---|---|
 | covered | 60 |
-| ported | 30 |
-| documented-boundary | 29 |
+| ported | 35 |
+| documented-boundary | 26 |
 | N/A | 57 |
-| **total** | **176** |
+| **total** | **178** |
 
 *(Counts are per-check for multi-check scripts; per-file for single-scenario scripts.
-Ported entries reference tests in `test_bcore_conformance.py` (20 tests) and
-`test_ashell_conformance.py` (14 tests); both verified 169/169 full-suite green.
+Ported entries reference tests in `test_bcore_conformance.py` (25 tests, +5 from A1 arc) and
+`test_ashell_conformance.py` (14 tests); both verified 191/191 full-suite green.
 Two proof script failures are documented-boundary, not regressions: `ays_m1a_r2.py`
 "prim taps ungated" predates M1d FIX1; `ays_m1d.py` "vmap se-gate per-lane count"
-is inherent scalar-tap duality confirmed by `ays_m1d_r2.py`.)*
+is inherent scalar-tap duality confirmed by `ays_m1d_r2.py`.
+A1 arc (fix/a1-cond-gating): `vmap_while.py` and `vmap_while_hardened.py` promoted from
+`documented-boundary` to `ported`; 3 AYS probes updated; prim-tap residual ghost boundary
+documented in `test_vmap_while_prim_tap_residual_ghost` and COVERAGE_MAP note below.
+Residual boundary: primitive taps inside vmapped while bodies still ghost-fire — carry-taps-only
+scope for A1 mitigation; extending to prim taps is a future arc.)*

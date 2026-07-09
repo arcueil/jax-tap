@@ -30,8 +30,14 @@ Initial release. Zero-code-change runtime telemetry for JAX control flow.
 
 ### Known boundaries (documented)
 
-- vmap×while_loop emits per-joint-iteration events including masked lanes
-  (inherent to JAX's batched while lowering).
+- **vmap×while_loop carry taps**: ghost events (from finished lanes executing
+  extra joint iterations) are now suppressed — only real per-lane steps reach
+  `on_step` and `alert`. Primitive taps (`taps=[...]`) inside vmapped while
+  bodies still fire for all joint iterations including ghost ones; extending
+  ghost-filtering to primitive taps is future work. The mitigation re-evaluates
+  the cond jaxpr inside each body iteration, adding ~13 µs/iter overhead for
+  all while-loop tapping (vmapped or not); convergence-check conds with real
+  float work add ~3-7 µs/iter on top of that (measured, bench/while_cond_overhead.py).
 - Taps riding along `grad` observe the forward pass only; tap the
   differentiated function (`tap.verbose(jax.grad(f))`) to observe the
   backward pass.
