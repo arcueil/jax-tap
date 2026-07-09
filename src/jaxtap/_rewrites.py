@@ -14,6 +14,15 @@ computation).
 ``verbose()`` in ``__init__.py``.  That closure wraps the callback in a device-side
 ``lax.cond(step % k == 0, ...)`` before passing it here, so the rewrites always
 call ``tap_cb`` unconditionally and correctness is preserved.
+
+``emit_carry`` (M1d FIX 2)
+--------------------------
+When False, the carry-tap call (``tap_cb(here, step, *new_carry, ...)``) is
+omitted from the reconstructed body.  The walker still descends into the body
+jaxpr via ``interp_fn`` so that primitive taps and nested-loop carry taps can
+fire — only THIS node's own carry heartbeat is suppressed.  This is a
+Python-time (trace-time) decision; no device-side overhead is added when
+``emit_carry=False``.
 """
 
 from __future__ import annotations
@@ -37,6 +46,8 @@ def rewrite_scan(
     here: str,
     interp_fn: Callable,
     outer_step: Any = None,
+    *,
+    emit_carry: bool = True,
 ) -> list:
     """
     Rebuild a scan equation with a per-step counter in the carry and a
@@ -56,6 +67,10 @@ def rewrite_scan(
         Stable path string for this scan node.
     interp_fn:
         The recursive interpreter (``_interp``), to be called on sub-jaxprs.
+    emit_carry:
+        When False, skip the ``tap_cb(here, step, ...)`` carry-heartbeat call
+        but still descend into the body via ``interp_fn`` so that primitive taps
+        and nested-loop carry taps can fire.  Default: True.
     """
     p = eqn.params
     body: "jax_core.ClosedJaxpr" = p["jaxpr"]
@@ -79,9 +94,9 @@ def rewrite_scan(
         # x arrives with the same pytree structure as xs.
         # Unpack into a flat list for the jaxpr body call.
         x_flat = list(x) if isinstance(x, (list, tuple)) else [x]
-        # Pass the live step as the 7th argument and total as the 8th so
-        # _interp can thread them to primitive taps (including those hidden
-        # behind jit boundaries).
+        # Pass the live step as the 7th argument, total as the 8th, and
+        # True as the 9th (_in_loop override) so _interp gates primitive
+        # taps with sample_every when inside this loop body.
         outs = interp_fn(
             body.jaxpr,
             body.consts,
@@ -91,12 +106,17 @@ def rewrite_scan(
             here + "/",
             step,
             total,
+            True,  # _in_loop=True: we are now inside a scan body
         )
         new_carry = outs[:ncar]
         ys = outs[ncar:]
-        # tap_cb already has sample_every gating baked in (see verbose() in __init__.py).
-        # total is a Python int captured from the enclosing rewrite_scan scope.
-        tap_cb(here, step, *new_carry, total=total)
+        # M1d FIX 2: emit_carry=False suppresses this node's carry heartbeat
+        # while still having descended into the body above (for prim taps and
+        # nested-loop carry taps).  emit_carry is a Python bool: no device overhead.
+        if emit_carry:
+            # tap_cb already has sample_every gating baked in (see verbose() in __init__.py).
+            # total is a Python int captured from the enclosing rewrite_scan scope.
+            tap_cb(here, step, *new_carry, total=total)
         return (new_carry, step + 1), ys
 
     (carry_out, _), ys = jax.lax.scan(
@@ -119,6 +139,8 @@ def rewrite_while(
     here: str,
     interp_fn: Callable,
     outer_step: Any = None,
+    *,
+    emit_carry: bool = True,
 ) -> list:
     """
     Rebuild a while_loop equation with a step counter augmented into the carry
@@ -128,6 +150,9 @@ def rewrite_while(
 
     ``sample_every`` gating lives one level up in ``verbose()`` — the rewrites
     always call ``tap_cb`` unconditionally.
+
+    ``emit_carry``: when False, skip the ``tap_cb(here, step, ...)`` call but
+    still descend into the body for primitive taps and nested-loop carry taps.
     """
     p = eqn.params
     cj: "jax_core.ClosedJaxpr" = p["cond_jaxpr"]
@@ -146,14 +171,18 @@ def rewrite_while(
 
     def body_fn(carry_step):
         carry, step = carry_step
-        # Pass the live step as the 7th argument and None as the 8th (total)
-        # because while_loop length is not known at trace time.
+        # Pass the live step as the 7th argument, None as the 8th (total), and
+        # True as the 9th (_in_loop override) so _interp gates primitive taps
+        # with sample_every when inside this while body.
         new_carry = interp_fn(
-            bj.jaxpr, bj.consts, [*bconsts, *carry], tap_cb, ops, here + "/", step, None
+            bj.jaxpr, bj.consts, [*bconsts, *carry], tap_cb, ops, here + "/", step, None, True
         )
-        # tap_cb already has sample_every gating baked in (see verbose() in __init__.py).
-        # total=None because while_loop length is unknown at trace time.
-        tap_cb(here, step, *new_carry, total=None)
+        # M1d FIX 2: emit_carry=False suppresses this node's carry heartbeat
+        # while still having descended into the body above.
+        if emit_carry:
+            # tap_cb already has sample_every gating baked in (see verbose()).
+            # total=None because while_loop length is unknown at trace time.
+            tap_cb(here, step, *new_carry, total=None)
         return (new_carry, step + 1)
 
     carry_out, _ = jax.lax.while_loop(cond_fn, body_fn, (init, jnp.int32(0)))

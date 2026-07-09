@@ -140,11 +140,19 @@ class PrimitiveTap:
 
     Scope
     -----
-    Primitive taps only fire in code the walker descends into.  Loops filtered by
-    ``ops``/``where``/``max_depth`` are not descended, so primitives inside them
-    are silent.  ``sample_every`` does NOT gate primitive taps (loop-carry taps
-    only).  AD-opaque primitives (``custom_jvp_call``/``custom_vjp_call``
-    interiors) are not descended.
+    The walker ALWAYS descends into scan/while bodies, so primitive taps fire
+    inside loops regardless of ``ops``/``where``/``max_depth`` filtering.
+    Those filters control only whether the loop node EMITS carry taps — they do
+    not suppress prim-tap coverage inside the body.
+    AD-opaque primitives (``custom_jvp_call``/``custom_vjp_call`` interiors)
+    are not descended (v1 policy unchanged).
+
+    ``sample_every`` gates primitive taps inside loops with the same device-side
+    ``lax.cond(step % se == 0, fire, noop)`` pattern as carry taps.  Primitive
+    taps that fire OUTSIDE any loop (``TapEvent.step == -1``) are always ungated
+    regardless of ``sample_every``.  ``once=`` and ``alert`` operate on the
+    events that survive the gate.  For se≥10 the callback cost amortises to
+    ~1 µs/step (see benchmark); se=10 is the recommended monitoring baseline.
 
     Step context
     ------------
@@ -356,15 +364,20 @@ def verbose(
     sample_every:
         Fire taps only on steps 0, k, 2k, … (device-side gate via
         ``lax.cond``).  Default: 1 (every step).  Must be ≥ 1.
-        Note: ``sample_every`` does NOT gate primitive taps (``taps=``).
+        Gates BOTH carry taps and primitive taps that fire inside a loop.
+        Primitive taps outside any loop (step == -1) are always ungated.
+        At se=10 the callback cost amortises to ~1 µs/step — recommended
+        for semi-production monitoring (see bench/README.md).
     where:
         Optional path predicate: only CF nodes whose path satisfies
-        ``where(path)`` are instrumented.  The address counter advances for
-        filtered-out nodes so addressing remains stable.  Default: all nodes.
+        ``where(path)`` EMIT carry taps.  The address counter advances for
+        filtered-out nodes so addressing remains stable.  The walker still
+        DESCENDS into filtered bodies, so primitive taps and nested carry taps
+        inside them fire normally.  Default: all nodes emit.
     max_depth:
         Optional depth limit.  CF nodes at depth > ``max_depth`` (depth =
-        number of ``/`` segments in the path) are bound opaquely.
-        Default: no limit.
+        number of ``/`` segments in the path) do not emit carry taps.
+        Deeper primitive taps and nested loops still fire.  Default: no limit.
     taps:
         Sequence of :class:`PrimitiveTap` specs created via :func:`on`.  After
         the walker binds any non-boundary primitive whose name matches a spec,
@@ -467,7 +480,12 @@ def verbose(
     if taps:
 
         def prim_tap_fn(
-            path: str, step: Any, outvals: tuple, spec: PrimitiveTap, total: "int | None" = None
+            path: str,
+            step: Any,
+            outvals: tuple,
+            spec: PrimitiveTap,
+            total: "int | None" = None,
+            _in_loop: bool = False,
         ) -> None:  # type: ignore[misc]
             # Apply output index selection first (trace-time bounds check).
             if spec.output is not None:
@@ -497,7 +515,18 @@ def verbose(
                 if _spec.alert is not None:
                     _fire_alert(_spec, event, _of)
 
-            jax.debug.callback(_host, step, *flat_selected, ordered=False)
+            # M1d FIX 1: gate primitive taps with sample_every when inside a loop.
+            # Prim taps OUTSIDE any loop (_in_loop=False / step sentinel -1) are
+            # always ungated so they always fire regardless of sample_every.
+            if sample_every > 1 and _in_loop:
+                jax.lax.cond(
+                    step % sample_every == 0,
+                    lambda _: jax.debug.callback(_host, step, *flat_selected, ordered=False),
+                    lambda _: None,
+                    step,
+                )
+            else:
+                jax.debug.callback(_host, step, *flat_selected, ordered=False)
 
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         if kwargs:
