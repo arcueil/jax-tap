@@ -47,12 +47,22 @@ else was ever touched.
 The `with` form is shipped and ready to use. (The original wrapping API
 `g, rec = tap.record(f)` is also available if you prefer.)
 
+## Install
+
+```bash
+pip install jax-tap                 # imports as `jaxtap`
+pip install "jax-tap[pandas]"       # optional: rec.df() → pandas
+```
+
+Requires `jax >= 0.10`. Use it as `import jaxtap as tap` (pronounced "just tap").
+
 ## What you can tap
 
 | Tap class | What it observes | Status |
 |-----------|------------------|--------|
 | **Control-flow / carry taps** | the mutating carry at every `scan`/`while` step, at any nesting depth, with stable addresses (`scan[0]/while[1]`) | ✅ shipped |
 | **Primitive taps** — *"just define L"* | outputs of named primitives (`tap.on("cholesky", ...)`): your body just writes `L = jnp.linalg.cholesky(M)`; the tap observes the actual `L` by primitive *kind* | ✅ shipped |
+| **Output / y-taps** | per-step scan **outputs** (the `ys`), not just the carry — e.g. NUTS `treedepth` each step, for live saturation tripwires (`select_ys`/`on_ys`/`alert_ys`) | ✅ shipped (0.3.0) |
 | Trace-time taps | shapes/dtypes/retrace events, at trace time, zero runtime cost | 🗺 roadmap |
 | jit-event taps | trace-vs-execute timestamps ("why is this recompiling / where did 400 s go") | 🗺 roadmap |
 | Backward-pass values | NaNs that exist only in the gradient pass | 🚫 documented boundary — grad-transform territory, out of scope by design |
@@ -446,24 +456,6 @@ From a single first call, measure *true* compile cost (trace + compile) separate
 **demo/ is the primary documentation.** It holds ten runnable files demonstrating real bugs from our own history (silent float32 Cholesky NaNs, adaptation metrics that never moved, inner loops that quit early, ...) — each shows the silent symptom, then jax-tap localizing it. A suggested reading order and context are in `demo/README.md`.
 
 The flagship: `demo/blackjax_warmup_telemetry.py` instruments a real BlackJAX warmup unmodified, streaming its step size and mass matrix as the algorithm adapts — no changes to BlackJAX, zero logging code in the warmup itself.
-
-## Status
-
-Pre-release; not yet on PyPI. The core library has passed 2-arm adversarial review with full remediation (B-core numerics, A-shell lifecycle) and GPU validation (CUDA 13, RTX 5090).
-
-| Component | Scope | State |
-|-----------|-------|-------|
-| Core | jaxpr-walker transform + tap specs | ✅ shipped |
-| Taps | carry/primitive/alert/discovery helpers | ✅ shipped |
-| Collectors | in-memory recorder, JSONL, `.df()` | ✅ shipped |
-| Reviews | 2-arm adversarial (B-core + A-shell) + remediation | ✅ completed |
-| GPU validation | CUDA 13, RTX 5090, full suite + demos | ✅ validated |
-| Demos | 10 runnable bug reproductions | ✅ completed |
-| Benchmarks | overhead profiling + recommendation ladder | ✅ completed |
-| Docs | README + docstrings + demo reading order | ✅ completed |
-| Conformance suite | 176-entry coverage map; 34 conformance tests (169 total) | ✅ done |
-| Release gate | GPU validation on release branch | pending |
-| PyPI | package distribution | pending |
 
 ## Known boundaries
 
