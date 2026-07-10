@@ -9,7 +9,7 @@ One row per attack/probe script across all corpora.
 - `N/A: <reason>` — not applicable (blackjax display thread, superseded API, etc.)
 
 **Conformance test files (both verified passing):**
-- `tests/conformance/test_bcore_conformance.py` — 25 tests, B-core lane (bcore-review + m1a/m1d-ays + A1 mitigation)
+- `tests/conformance/test_bcore_conformance.py` — 34 tests, B-core lane (see tally note for breakdown)
 - `tests/conformance/test_ashell_conformance.py` — 14 tests, A-shell lane (ashell-review arm-s/arm-l)
 
 **Note on attack-ledger-964:** All 53 scripts in arm-a and arm-b targeted the blackjax progress-bar
@@ -254,16 +254,35 @@ New regression tests added to `test_bcore_conformance.py` for the B-form vmap×w
 
 | test | what it covers |
 |---|---|
-| `test_bform_vmap_while_no_crash_and_bitwise` | Bug 2 repro: `verbose(vmap(while))` — no crash; 0 while taps; bitwise-identical output |
+| `test_bform_vmap_while_no_crash_and_bitwise` | Bug 2 repro: `verbose(vmap(while))` — no crash; int+float bitwise-identical; 0 while taps |
 | `test_bform_vmap_scan_while_no_crash_and_scan_taps` | Bug 1 / consumer repro: `verbose(vmap(scan(while)))` — no crash; scan taps fire with batched carry; 0 while taps; bitwise-identical |
 | `test_bform_nested_vmap_while_no_crash` | predicate robustness: `verbose(vmap(vmap(while)))` — ndim=2 cond detected; no crash; bitwise-identical |
 
 Disposition: all three are `ported` (new crash-fix regression coverage, no prior proof scripts).
 
 Semantics note: B-form `verbose(vmap(f))` where `f` contains a `while_loop` now binds the
-while opaquely (suppresses while carry taps).  `jax.vmap(tap.verbose(f))` continues to
-deliver per-lane carry taps with A1 ghost-drop (unchanged).  See CHANGELOG for the full
-semantics table.
+while opaquely (suppresses while carry taps and ALL taps in the batched-while subtree).
+`jax.vmap(tap.verbose(f))` continues to deliver per-lane carry taps with A1 ghost-drop
+(unchanged).  See CHANGELOG for the full semantics table.
+
+## AYS-1 arc (opaque-bind blast radius + A-form consumer path)
+
+| test | what it covers |
+|---|---|
+| `test_bform_vmap_while_opaque_bind_blast_radius_prim_tap` | opaque bind suppresses prim-taps (`tap.on("add")`) inside batched-while body; control confirms API valid in non-vmap while |
+| `test_bform_vmap_while_opaque_bind_blast_radius_nested_scan` | opaque bind suppresses nested scans inside batched-while body; parent taps fire normally |
+| `test_aform_vmap_scan_while_consumer_path` | A-form `with tap.record():` around `jax.vmap(scan(while))`: per-lane scan (12) and while (16) events; scalar carry; bitwise-identical; pre-jit hazard documented |
+
+Disposition: all three are `ported` (new AYS-1 probes converted to permanent regression tests).
+
+## AYS-2 arc (predicate boundary tests)
+
+| test | what it covers |
+|---|---|
+| `test_predicate_false_positive_vector_carry_scalar_cond` | non-vmap while with vector carry (shape (8,)) and scalar cond (norm, index) — taps fire; predicate keys on COND OUTPUT shape, not carry shape; ndim=0 confirmed by jaxpr inspection |
+| `test_predicate_false_negative_impossible` | vmap with `in_axes=None` scalar counter: JAX leaves cond scalar (ndim=0); predicate routes to rewrite_while; 5 carry taps fire; output bitwise-identical — proves ndim=0→safe, no escape to crash |
+
+Disposition: both are `ported` (new AYS-2 boundary tests, no prior proof scripts).
 
 ---
 
@@ -272,15 +291,25 @@ semantics table.
 | disposition | count |
 |---|---|
 | covered | 60 |
-| ported | 38 |
+| ported | 43 |
 | documented-boundary | 26 |
 | N/A | 57 |
-| **total** | **181** |
+| **total** | **186** |
 
 *(Counts are per-check for multi-check scripts; per-file for single-scenario scripts.
-Ported entries reference tests in `test_bcore_conformance.py` (28 tests = 25 original + 6
-from A1 arc + 3 from fix/vmap-while-crash) and `test_ashell_conformance.py` (14 tests);
-full suite 195/195 green after fix/vmap-while-crash.
+Ported entries reference tests in `test_bcore_conformance.py` and `test_ashell_conformance.py`.
+
+`test_bcore_conformance.py` breakdown (34 tests after AYS-2):
+- 20 ported from proof scripts: fixreview_bcore (5) + fixreview_round2 (5) + arm-a/grad2 (2)
+  + arm-a/dtypes (3) + m1a (3) + m1d (2)
+- 6 from A1 arc (fix/a1-cond-gating): vmap_while ghost-suppression mitigation tests
+- 3 from fix/vmap-while-crash: crash repros + nested-vmap predicate
+- 3 from AYS-1: blast-radius (prim + nested scan) + A-form consumer
+- 2 from AYS-2: false-positive guard + false-negative impossibility
+
+`test_ashell_conformance.py`: 14 tests.
+Full suite: 200/200 green after AYS-2.
+
 Two proof script failures are documented-boundary, not regressions: `ays_m1a_r2.py`
 "prim taps ungated" predates M1d FIX1; `ays_m1d.py` "vmap se-gate per-lane count"
 is inherent scalar-tap duality confirmed by `ays_m1d_r2.py`.
