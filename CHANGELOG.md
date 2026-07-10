@@ -24,10 +24,31 @@
   | `jax.vmap(tap.verbose(f))` | yes — A1 per-lane ghost-drop | unchanged; A-form scalar intercept was never broken |
   | `tap.verbose(jax.vmap(f))` | **suppressed** (opaque bind) | crash fixed; bitwise-identical output |
 
+  **Opaque-bind blast radius**: the opaque bind suppresses the entire B-form
+  walker descent into the batched while's subtree — not just the while's own
+  carry tap.  Prim-taps (`tap.on("add")` etc.) and scans nested inside the
+  vmap-batched while body are also suppressed.  Parent taps (e.g. a scan that
+  *wraps* the vmapped while) fire normally.  This is documented and tested.
+
+  **A-form consumer path** (`with tap.record(): jax.vmap(f)(batch)`): the
+  A-form monkeypatches `jax.lax.while_loop` before vmap's batching rule applies,
+  so it intercepts at the scalar-in-vmap level — both the inner while and outer
+  scan taps fire per-lane.  **Critical caveat**: if the vmapped function is
+  compiled by `jax.jit` *outside* a `record()` context first (cache populated
+  before record is active), the compiled artifact has no callbacks and subsequent
+  calls inside `record()` emit 0 events.  Consumer guidance:
+
+  - **B-form** (`tap.verbose(jax.vmap(f))`): recommended when the function may
+    already be jit-compiled.  Scan taps fire (batched carry).  While taps
+    suppressed (opaque bind).  No pre-jit hazard.
+  - **A-form** (`with tap.record(): vmapped_f(batch)`): fires per-lane scan AND
+    while taps.  Ensure the *first call* (jit compilation) happens inside the
+    `record()` context.
+
   Outer **scan** carry taps around the vmapped while fire correctly with batched
-  carry values — this is the high-value diagnostic for NUTS/HMC samplers
-  (treedepth etc. live in the scan carry, not the inner while).  Per-lane while
-  telemetry under B-form vmap is a future arc.
+  carry values in B-form — this is the high-value diagnostic for NUTS/HMC
+  samplers (treedepth etc. live in the scan carry, not the inner while).
+  Per-lane while telemetry under B-form vmap is a future arc.
 
 ## 0.2.0 (2026-07-09)
 
