@@ -399,6 +399,46 @@ Pre-release; not yet on PyPI. The core library has passed 2-arm adversarial revi
 
 See `CHANGELOG.md` under "Known boundaries" for the complete documented list. In brief: `vmap×while_loop` includes masked lanes; taps riding `grad` observe the forward pass only (tap the differentiated function to observe backward); trace-time config travels with compiled artifacts on cache hits (host routing is live); the jit re-wrap does not thread donation/shardings.
 
+### Cross-consumer select: trace-time config wins on JIT cache hit
+
+When a function is compiled under consumer A's `select` configuration, later
+calls under consumer B's different `select` will observe A's trace-time-baked
+selection, not B's. This is because `select` runs on-device (inside the traced
+program) and is frozen at compile time; only host-side routing is dynamic.
+
+**Example:**
+```python
+import jax, jax.numpy as jnp
+import jaxtap as tap
+
+def scan_fn(x0, xs):
+    def body(carry, x):
+        return carry + x, carry * 2.0
+    return jax.lax.scan(body, x0, xs)
+
+jax.clear_caches()
+x0, xs = jnp.float32(1.0), jnp.arange(3.0, dtype=jnp.float32)
+
+# Consumer A: compile with empty select
+g_a, _ = tap.record(scan_fn, select=lambda _: ())
+result_a = g_a(x0, xs)  # Compiled; select baked at trace time
+jax.block_until_ready(result_a)
+
+# Consumer B: call cached g_a with different select
+with tap.record(select=lambda c: c.mean()) as rec_b:
+    result_b = g_a(x0, xs)  # Cache hit; A's select still applies
+    jax.block_until_ready(result_b)
+
+# B requested select=lambda c: c.mean(), but trace-time select (A's empty
+# select) was baked into the compiled artifact. Result: B observes ()
+# (empty tuple) not the requested mean value.
+print(rec_b.events)  # []  (A's callback was baked; B's context receives none)
+```
+
+**Recommendation:** Compile each consumer's function under its own select
+configuration. Don't share compiled `tap.record(f)` artifacts across consumers
+with different `select` configs.
+
 ## Naming
 
 Distribution `jax-tap`, import `jaxtap`, documented alias `import jaxtap as tap`.
