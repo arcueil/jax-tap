@@ -399,14 +399,21 @@ Pre-release; not yet on PyPI. The core library has passed 2-arm adversarial revi
 
 See `CHANGELOG.md` under "Known boundaries" for the complete documented list. In brief: `vmap×while_loop` includes masked lanes; taps riding `grad` observe the forward pass only (tap the differentiated function to observe backward); trace-time config travels with compiled artifacts on cache hits (host routing is live); the jit re-wrap does not thread donation/shardings.
 
-### Cross-consumer select: trace-time config wins on JIT cache hit
+### Cross-consumer select: compiled artifacts lock selection
 
-When a function is compiled under consumer A's `select` configuration, later
-calls under consumer B's different `select` will observe A's trace-time-baked
-selection, not B's. This is because `select` runs on-device (inside the traced
-program) and is frozen at compile time; only host-side routing is dynamic.
+When you compile an instrumented function under consumer A (via `tap.record(f)`,
+`tap.verbose(f)`, or wrapped in `jax.jit`), A's `select` config is baked into
+the compiled artifact. Later calls by consumer B with a different `select` will
+NOT see B's selection—B's context receives **zero events** because A's baked
+callback owns the artifact. This is the sharp edge: the `select` function runs
+on-device (inside the traced program) and is frozen at compile time.
 
-**Example:**
+**Under the `with tap.record():` A-form**, each distinct `select` re-traces the
+function, so you get your own selection; this is safe. The boundary applies
+when reusing a **compiled instrumented artifact** (B-form function, or JIT
+boundary) across consumers with different selects.
+
+**Example** (sharp edge: sharing compiled B-form across consumers):
 ```python
 import jax, jax.numpy as jnp
 import jaxtap as tap
@@ -419,25 +426,35 @@ def scan_fn(x0, xs):
 jax.clear_caches()
 x0, xs = jnp.float32(1.0), jnp.arange(3.0, dtype=jnp.float32)
 
-# Consumer A: compile with empty select
-g_a, _ = tap.record(scan_fn, select=lambda _: ())
-result_a = g_a(x0, xs)  # Compiled; select baked at trace time
+# Consumer A: compile with empty select (B-form)
+g_a, rec_a = tap.record(scan_fn, select=lambda _: ())
+result_a = g_a(x0, xs)  # Compiled; A's select baked at trace time
 jax.block_until_ready(result_a)
+print(len(rec_a.events))  # 3
 
-# Consumer B: call cached g_a with different select
+# Consumer B: call cached g_a in B's own context with different select
 with tap.record(select=lambda c: c.mean()) as rec_b:
-    result_b = g_a(x0, xs)  # Cache hit; A's select still applies
+    result_b = g_a(x0, xs)  # Cache hit: A's baked callback, not B's
     jax.block_until_ready(result_b)
 
-# B requested select=lambda c: c.mean(), but trace-time select (A's empty
-# select) was baked into the compiled artifact. Result: B observes ()
-# (empty tuple) not the requested mean value.
-print(rec_b.events)  # []  (A's callback was baked; B's context receives none)
+# A's instrumented callback was baked into the compiled g_a artifact.
+# When B calls g_a, A's callback fires; B's context is invisible to the
+# compiled code. B's select never runs; result: B receives no events.
+print(len(rec_b.events))  # 0  (not 3, and not the mean values B requested)
 ```
 
-**Recommendation:** Compile each consumer's function under its own select
-configuration. Don't share compiled `tap.record(f)` artifacts across consumers
-with different `select` configs.
+Output:
+```
+3
+0
+```
+
+**Recommendation:** Instrument each consumer's function under its own `select`
+configuration. Avoid sharing compiled `tap.record(f)`, `tap.verbose(f)`, or
+JIT-wrapped instrumented artifacts across consumers with different `select`
+configs. If you need the same function under different selects, compile it
+separately for each consumer (or re-wrap it under the A-form
+`with tap.record(select=...):`).
 
 ## Naming
 
