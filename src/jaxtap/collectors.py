@@ -218,11 +218,13 @@ class JSONLWriter:
 
     **JSONL format**: Each line is a JSON object::
 
-        {"path": "scan[0]", "step": 0, "value_kind": "tuple", "value": [1.0, 2.0]}
-        {"path": "scan[0]", "step": 1, "value_kind": "scalar", "value": 3.5}
-        {"path": "scan[0]", "step": 2, "value_kind": "dict", "value": {"a": 1.0}}
+        {"path": "scan[0]", "step": 0, "value_kind": "tuple", "value": [1.0, 2.0], "kind": "carry"}
+        {"path": "scan[0]", "step": 1, "value_kind": "scalar", "value": 3.5, "kind": "output"}
+        {"path": "scan[0]", "step": 2, "value_kind": "dict", "value": {"a": 1.0}, "kind": "carry"}
 
     ``value_kind`` is one of ``"scalar"``, ``"tuple"``, or ``"dict"``.
+    ``kind`` is the event kind: ``"carry"`` for carry-tap events or ``"output"``
+    for y-tap events (added in 0.3.0).
     JAX/numpy arrays are converted to Python scalars or lists.
 
     Examples
@@ -245,12 +247,18 @@ class JSONLWriter:
         self._file = self._path.open("w", encoding="utf-8")
 
     def __call__(self, event: Any) -> None:
-        value, kind = _value_to_json(event.value)
+        value, value_kind = _value_to_json(event.value)
         obj = {
             "path": event.path,
             "step": int(event.step),
-            "value_kind": kind,
+            "value_kind": value_kind,
             "value": value,
+            # "kind" (event kind: "carry" | "output") is distinct from "value_kind"
+            # (value container type: "scalar" | "tuple" | "dict").
+            # Serialized as "kind" so y-tap events survive a JSONL round-trip.
+            # getattr guard: tolerates TapEvent objects from code that predates
+            # the kind field (defaults to "carry", the backward-compat value).
+            "kind": getattr(event, "kind", "carry"),
         }
         self._file.write(json.dumps(obj, default=_json_default) + "\n")
         self._file.flush()
@@ -308,9 +316,13 @@ def read_jsonl(path: "str | Path") -> list:
     list
         A list of :class:`TapEvent` objects with values reconstructed as:
 
-        - ``"tuple"`` kind → Python tuple of numpy scalars / arrays
-        - ``"dict"`` kind → dict with numpy scalar / array values
-        - ``"scalar"`` kind → numpy scalar
+        - ``"tuple"`` value_kind → Python tuple of numpy scalars / arrays
+        - ``"dict"`` value_kind → dict with numpy scalar / array values
+        - ``"scalar"`` value_kind → numpy scalar
+
+        ``TapEvent.kind`` (``"carry"`` or ``"output"``) is restored from the
+        ``"kind"`` field in the JSONL record.  Files written before 0.3.0
+        (which do not have a ``"kind"`` field) default to ``"carry"``.
 
     Raises
     ------
@@ -340,10 +352,21 @@ def read_jsonl(path: "str | Path") -> list:
             if not line:
                 continue
             obj = json.loads(line)
-            kind = obj.get("value_kind", "tuple")
+            value_kind = obj.get("value_kind", "tuple")
             raw = obj["value"]
-            value = _reconstruct_value(raw, kind)
-            events.append(TapEvent(path=obj["path"], step=obj["step"], value=value))
+            value = _reconstruct_value(raw, value_kind)
+            # "kind" is the event kind ("carry" | "output"), distinct from
+            # "value_kind" (value container type).  Old files without "kind"
+            # default to "carry" for backward compatibility.
+            event_kind = obj.get("kind", "carry")
+            events.append(
+                TapEvent(
+                    path=obj["path"],
+                    step=obj["step"],
+                    value=value,
+                    kind=event_kind,
+                )
+            )
     return events
 
 
