@@ -66,6 +66,7 @@ from typing import TYPE_CHECKING, Any
 import jax
 import jax.numpy as jnp
 
+from ._ashell import _original_scan as original_scan
 from ._walker import interpret
 
 if TYPE_CHECKING:
@@ -82,6 +83,7 @@ __all__ = [
     "verbose",
     "record",
     "emergency_restore",
+    "original_scan",
     "FlightRecorder",
     "JSONLWriter",
     "read_jsonl",

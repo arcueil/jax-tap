@@ -1020,3 +1020,45 @@ def test_ashell_record_bform_inside_context_no_double():
     assert len(rec_ctx.events) == 0, (
         f"outer context: expected 0 events from record(f) call, got {len(rec_ctx.events)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 26. Public API: original_scan export
+# ---------------------------------------------------------------------------
+
+
+def test_original_scan_export():
+    """jaxtap.original_scan is the pristine jax.lax.scan, unchanged after context."""
+    from jaxtap._ashell import _original_scan
+
+    # original_scan must be importable from jaxtap namespace
+    assert hasattr(tap, "original_scan"), "tap.original_scan not found"
+
+    # At import time, before any patching, original_scan must equal the pristine scan
+    assert tap.original_scan is _original_scan, (
+        "tap.original_scan should reference the captured pristine jax.lax.scan"
+    )
+
+    # jax.lax.scan must equal original_scan at session start (no active context)
+    assert jax.lax.scan is tap.original_scan, (
+        "At session start, jax.lax.scan should be the pristine original_scan"
+    )
+
+    # After a context enters and exits, original_scan must remain unchanged
+    x0 = jnp.float32(1.0)
+    xs = jnp.arange(5.0, dtype=jnp.float32)
+
+    with tap.record():
+        _simple_scan(x0, xs)
+
+    jax.block_until_ready(None)
+
+    # After exit, jax.lax.scan should be restored to original_scan
+    assert jax.lax.scan is tap.original_scan, (
+        "After context exit, jax.lax.scan should be restored to original_scan"
+    )
+
+    # original_scan itself must never change
+    assert tap.original_scan is _original_scan, (
+        "original_scan reference must remain unchanged throughout session"
+    )
