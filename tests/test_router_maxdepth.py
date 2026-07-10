@@ -213,3 +213,70 @@ def test_router_maxdepth_same_context_count_unchanged():
     assert len(deep) == 0, (
         f"max_depth=0 baked device-side must emit 0 deep events; got {len(deep)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 4. Alert-once budget: filtered events must not consume _carry_once_fired
+#
+# alert_once limits the FAIL stderr line to one per path.  alert_fn itself is
+# called for each delivered event; _carry_once_fired is populated on the first
+# truthy return.  The early `return` in _dynamic_router (before _carry_alert_fn)
+# means filtered deep events never call alert_fn and never touch the once-set.
+# A legit depth-0 event must therefore still produce its FAIL line even when
+# deep events arrive on the same run.
+# ---------------------------------------------------------------------------
+
+
+def test_router_maxdepth_filtered_events_do_not_consume_alert_once_budget(capsys):
+    """alert_once budget is not pre-consumed by filtered deep events.
+
+    Compile under max_depth=None so the XLA artifact bakes full-depth callbacks.
+    Call under max_depth=0, alert_once=True, always-truthy alert.
+
+    Expected:
+      - alert_fn is NOT called for any filtered deep event (early return before
+        _carry_alert_fn — the once budget is never touched by them).
+      - alert_fn IS called for each depth-0 event (N_OUTER times).
+      - exactly 1 FAIL line is written to stderr (alert_once limits output).
+    """
+    x0 = jnp.float32(1.0)
+    alert_calls: list[str] = []
+
+    def alert_fn(event: tap.TapEvent) -> bool:
+        alert_calls.append(event.path)
+        return True
+
+    # Compile under no depth limit so the artifact emits at all depths.
+    jax.clear_caches()
+    with tap.record():
+        f_jit = jax.jit(_nested_scan)
+        jax.block_until_ready(f_jit(x0))
+    jax.effects_barrier()
+
+    with tap.record(max_depth=0, alert=alert_fn, alert_once=True) as rec:
+        jax.block_until_ready(f_jit(x0))
+    jax.effects_barrier()
+
+    depth0_events = [e for e in rec.events if e.path == "scan[0]"]
+    deep_events = [e for e in rec.events if e.path.count("/") > 0]
+    deep_alert_calls = [p for p in alert_calls if p.count("/") > 0]
+    depth0_alert_calls = [p for p in alert_calls if p.count("/") == 0]
+
+    # Filtered deep events must not reach alert_fn at all.
+    assert len(deep_events) == 0, "deep events must be filtered from recorder"
+    assert len(deep_alert_calls) == 0, (
+        f"alert_fn must not be called for filtered deep events; called on: {deep_alert_calls}"
+    )
+    # Depth-0 events are delivered; alert_fn fires N_OUTER times.
+    assert len(depth0_events) == N_OUTER, (
+        f"expected {N_OUTER} depth-0 events; got {len(depth0_events)}"
+    )
+    assert len(depth0_alert_calls) == N_OUTER, (
+        f"alert_fn must be called for each depth-0 event; got {len(depth0_alert_calls)}"
+    )
+    # alert_once: exactly 1 FAIL line for the depth-0 path.
+    captured = capsys.readouterr()
+    fail_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")]
+    assert len(fail_lines) == 1, (
+        f"alert_once must produce exactly 1 FAIL line; got: {fail_lines}"
+    )
