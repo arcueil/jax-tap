@@ -749,3 +749,263 @@ def test_alert_ys_receives_tapevents():
         assert e.path == "scan[0]"
         assert e.total == 3
         assert 0 <= e.step < 3
+
+
+# ---------------------------------------------------------------------------
+# AYS-1 item 1: JSONL round-trip preserves kind
+# ---------------------------------------------------------------------------
+
+
+def test_jsonl_roundtrip_kind_preserved(tmp_path):
+    """JSONL write → read preserves kind='output' for y-tap events.
+
+    Regression guard for the bug where JSONLWriter omitted 'kind' and
+    read_jsonl reconstructed all events as kind='carry' (the default).
+    """
+    import jaxtap
+
+    f, init = _simple_scan(n_steps=3)
+
+    # Collect both carry and output events with B-form record().
+    y_events_written = []
+    g, rec = tap.record(f, on_ys=lambda e: y_events_written.append(e))
+    g(init)
+
+    in_memory_output = [e for e in rec.events if e.kind == "output"]
+    in_memory_carry = [e for e in rec.events if e.kind == "carry"]
+    assert len(in_memory_output) == 3, "in-memory: 3 output events expected"
+    assert len(in_memory_carry) == 3, "in-memory: 3 carry events expected"
+
+    # Write ALL events (carry + output) to JSONL.
+    jsonl_path = tmp_path / "events.jsonl"
+    with jaxtap.JSONLWriter(jsonl_path) as w:
+        for event in rec.events:
+            w(event)
+
+    # Read back and verify kind is preserved.
+    restored = jaxtap.read_jsonl(jsonl_path)
+    assert len(restored) == 6
+
+    restored_output = [e for e in restored if e.kind == "output"]
+    restored_carry = [e for e in restored if e.kind == "carry"]
+    assert len(restored_output) == 3, (
+        f"JSONL round-trip lost kind: expected 3 output events, got {len(restored_output)}. "
+        "All events defaulting to kind='carry' indicates 'kind' key is missing from JSONL."
+    )
+    assert len(restored_carry) == 3
+
+    # Step ordering preserved.
+    assert [e.step for e in restored_output] == [0, 1, 2]
+
+
+def test_jsonl_roundtrip_old_file_defaults_carry(tmp_path):
+    """JSONL files without 'kind' field (pre-0.3.0) default to kind='carry'."""
+    import json
+
+    # Write a JSONL file manually without the 'kind' field (old format).
+    jsonl_path = tmp_path / "old_events.jsonl"
+    with jsonl_path.open("w") as f:
+        for i in range(3):
+            f.write(
+                json.dumps(
+                    {
+                        "path": "scan[0]",
+                        "step": i,
+                        "value_kind": "scalar",
+                        "value": float(i),
+                    }
+                )
+                + "\n"
+            )
+
+    import jaxtap
+
+    restored = jaxtap.read_jsonl(jsonl_path)
+    assert len(restored) == 3
+    # Old files without 'kind' must default to 'carry' (backward compat).
+    assert all(e.kind == "carry" for e in restored)
+
+
+# ---------------------------------------------------------------------------
+# AYS-1 item 2: alert_ys two-context staleness proof
+# ---------------------------------------------------------------------------
+
+
+def test_alert_ys_two_context_not_stale():
+    """alert_ys is resolved LIVE from the active context — not baked at trace time.
+
+    Compiles a jitted scan under context-1 with alert_ys=A; exits context-1;
+    calls the SAME cached artifact under context-2 with alert_ys=B.
+    B's alert_ys must fire; A must NOT receive new events from context-2.
+    """
+
+    def f():
+        def body(carry, x):
+            return carry + x, carry * 2.0
+
+        return jax.lax.scan(body, jnp.float32(0.0), jnp.arange(3, dtype=jnp.float32))
+
+    f_jitted = jax.jit(f)
+    jax.clear_caches()  # ensure context-1 compiles fresh
+
+    A_events = []
+    A_alert_fn = lambda e: A_events.append(e.step) or "A_alert"  # noqa: E731
+
+    with tap.record(on_ys=lambda e: None, alert_ys=A_alert_fn):
+        f_jitted()  # compiles; bakes _dynamic_router (not A_alert_fn) into XLA artifact
+
+    # Context-1 closed. A_events captured 3 alerts (one per step).
+    assert len(A_events) == 3, (
+        f"context-1 should have captured 3 alerts, got {len(A_events)}"
+    )
+
+    # Context-2: cache hit — XLA artifact reuses compiled _dynamic_router.
+    B_events = []
+    B_alert_fn = lambda e: B_events.append(e.step) or "B_alert"  # noqa: E731
+
+    with tap.record(on_ys=lambda e: None, alert_ys=B_alert_fn):
+        f_jitted()  # cache hit — _dynamic_router fires, looks up rec2's alert_ys
+
+    # B fired for all 3 steps.
+    assert len(B_events) == 3, f"context-2 alert_ys must fire (got {len(B_events)})"
+    # A received NO new events from context-2 (still exactly 3 from context-1).
+    assert len(A_events) == 3, (
+        f"context-1's dead alert_ys fired during context-2 (staleness bug): "
+        f"A_events grew to {len(A_events)}"
+    )
+
+
+def test_alert_ys_once_per_context_budget():
+    """alert_ys_once budget resets between contexts — each context gets a fresh set.
+
+    NOTE on semantics: _fire_carry_alert always invokes the predicate function to
+    obtain its truthy result; alert_ys_once only gates the STDERR emission (the
+    [tap] FAIL line), not the predicate call.  So we check stderr line counts,
+    not predicate call counts.
+    """
+
+    def f():
+        def body(carry, x):
+            return carry + x, carry * 2.0
+
+        return jax.lax.scan(body, jnp.float32(0.0), jnp.arange(3, dtype=jnp.float32))
+
+    f_jitted = jax.jit(f)
+    jax.clear_caches()
+
+    buf1 = io.StringIO()
+    old_stderr = sys.stderr
+    sys.stderr = buf1
+    try:
+        with tap.record(
+            on_ys=lambda e: None,
+            alert_ys=lambda e: "ctx1_once",
+            alert_ys_once=True,
+        ) as _:
+            f_jitted()  # compiles; alert_ys_once=True → 1 stderr line for "scan[0]"
+    finally:
+        sys.stderr = old_stderr
+
+    # Only one FAIL line for 3 steps (once budget spent after step 0).
+    assert buf1.getvalue().count("[tap] FAIL") == 1, (
+        f"context-1 alert_ys_once: expected 1 FAIL line, got: {buf1.getvalue()!r}"
+    )
+
+    # Context-2: fresh _ys_once_fired → the once budget is fresh → should fire once again.
+    buf2 = io.StringIO()
+    sys.stderr = buf2
+    try:
+        with tap.record(
+            on_ys=lambda e: None,
+            alert_ys=lambda e: "ctx2_once",
+            alert_ys_once=True,
+        ) as _:
+            f_jitted()  # cache hit — FRESH _ys_once_fired → fires once more
+    finally:
+        sys.stderr = old_stderr
+
+    assert buf2.getvalue().count("[tap] FAIL") == 1, (
+        f"context-2 should have its own fresh alert_ys_once budget, got: {buf2.getvalue()!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AYS-1 item 3: router coherence under max_depth with kind dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_router_maxdepth_ytap_coherence():
+    """Under max_depth=0, verify three-way routing:
+
+    (i)  Deep y-tap output event → FILTERED (path ends scan[k], depth=1 > 0)
+    (ii) Deep prim-tap → SURVIVES (path ends primname[k], not a CF boundary)
+    (iii) Deep carry event → FILTERED (path ends scan[k], depth=1 > 0)
+
+    Confirms that the kind-dispatch in _dynamic_router did not break the
+    prim-tap NaN-tripwire survival guarantee from the #2 router arc.
+    """
+
+    def f():
+        # Outer scan (depth 0): carry tap fires at "scan[0]"
+        def outer_body(carry, _):
+            # Inner scan (depth 1): carry at "scan[0]/scan[0]"; y-tap at same path.
+            # prim-tap (dot_general) fires inside inner body at depth 1.
+            def inner_body(ic, x):
+                # 1D dot of two 1D arrays → scalar (dot_general primitive)
+                new_ic = jnp.dot(jnp.array([ic, 1.0]), jnp.array([1.0, x]))
+                return new_ic, new_ic  # inner ys = scalar carry
+
+            return lax.scan(inner_body, carry, jnp.ones(2))
+
+        return lax.scan(outer_body, jnp.float32(0.0), jnp.ones(2))
+
+    jax.clear_caches()
+
+    carry_paths = []
+    output_paths = []
+
+    with tap.record(
+        on_step=lambda e: carry_paths.append(e.path),
+        on_ys=lambda e: output_paths.append(e.path),
+        taps=[tap.on("dot_general", select=lambda outs: outs[0])],
+        max_depth=0,
+    ) as rec:
+        f()
+
+    # (i) Deep y-tap (path "scan[0]/scan[0]", depth=1) → filtered by max_depth=0.
+    # output_paths come from on_ys which only fires for kind="output" events.
+    deep_output = [p for p in output_paths if "/" in p]
+    assert len(deep_output) == 0, (
+        f"Deep y-tap events should be filtered by max_depth=0, got: {deep_output}"
+    )
+
+    # (ii) Prim-tap → SURVIVES max_depth filter (NaN-tripwire guarantee).
+    # Prim-tap events land in rec.events (kind="carry" by default) and have paths
+    # like "scan[0]/scan[0]/dot_general[0]" (ending in primname[k], not scan[k]).
+    prim_rec_events = [e for e in rec.events if "dot_general" in e.path]
+    assert len(prim_rec_events) > 0, (
+        "Prim-tap events should SURVIVE max_depth=0 filter (NaN-tripwire guarantee)"
+    )
+
+    # (iii) Deep carry event (path "scan[0]/scan[0]", depth=1) → filtered.
+    # carry_paths come from on_step; prim-tap events also fire on_step, so we
+    # filter by path ending in "scan[k]" or "while[k]" to isolate carry events.
+    def _is_carry_path(p: str) -> bool:
+        last_seg = p.rsplit("/", 1)[-1]
+        return last_seg.startswith(("scan[", "while["))
+
+    deep_carry = [p for p in carry_paths if "/" in p and _is_carry_path(p)]
+    assert len(deep_carry) == 0, (
+        f"Deep carry events should be filtered by max_depth=0, got: {deep_carry}"
+    )
+
+    # Shallow carry (depth 0, path "scan[0]") → fires normally (2 outer steps).
+    shallow_carry = [p for p in carry_paths if p == "scan[0]"]
+    assert len(shallow_carry) == 2, (
+        f"Outer scan carry should fire 2 times (2 steps), got {len(shallow_carry)}"
+    )
+
+    print(
+        f"[coherence] carry_paths={carry_paths}, output_paths={output_paths}, "
+        f"prim_events={len(prim_rec_events)}"
+    )
