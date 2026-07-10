@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 0.3.0
+## 0.3.0 (2026-07-10)
 
 ### New: y-taps — taps on scan OUTPUTS (per-step `ys`) (GitHub #3)
 
