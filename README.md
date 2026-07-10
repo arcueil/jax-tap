@@ -461,6 +461,30 @@ The flagship: `demo/blackjax_warmup_telemetry.py` instruments a real BlackJAX wa
 
 See `CHANGELOG.md` under "Known boundaries" for the complete documented list. In brief: `vmap×while_loop` includes masked lanes; taps riding `grad` observe the forward pass only (tap the differentiated function to observe backward); trace-time config travels with compiled artifacts on cache hits (host routing is live); the jit re-wrap does not thread donation/shardings.
 
+### `vmap`×`while_loop`: which call patterns are transparent
+
+A `while_loop` inside `jax.vmap` is walked **transparently** (its inner taps
+fire) when its cond depends **only on a non-vmapped value** — e.g. a step
+counter (`s[0] < N`). Under vmap the cond output then stays **scalar** (`ndim
+0`), and jax-tap recurses into the loop body normally.
+
+It is **opaque** (only the surrounding `scan`/carry events surface, no inner
+`while` taps) when the cond depends on a **per-chain computed value** — e.g. a
+convergence/divergence flag set inside the body (NUTS's `do_keep_integrating`,
+built from `has_terminated` / `is_diverging`). JAX's vmap batching rule then
+keeps the cond output **batched** (`ndim 1`), which trips jax-tap's
+`_cond_is_batched` guard: the `while` is bound opaquely to preserve
+bitwise-identical outputs (JAX's reduction + lane-masking happen at XLA
+lowering, not in the jaxpr, so the walker can't safely reconstruct them). This
+is the same mechanism as the vmap-batched-`while` note above — surfaced by the
+cond's dtype/shape, not by any jit-cache state.
+
+Practically: NUTS/dynamic-trajectory samplers under `vmap` fall in the opaque
+case, but the pathology still reaches you — a NaN inside the trajectory loop
+propagates through the carry into the outer `scan[0]` events, where a carry tap
+(or `watch_nan`) catches it. Inner per-step trajectory telemetry under vmap is
+future work.
+
 ### Cross-consumer select: compiled artifacts lock selection
 
 When you compile an instrumented function under consumer A (via `tap.record(f)`,
