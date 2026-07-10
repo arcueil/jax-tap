@@ -365,6 +365,76 @@ with tap.record(
 - Zero device-side cost: `alert` is purely host-side.  The compiled XLA
   artifact is identical whether or not `alert=` is set.
 
+### Y-taps: tapping scan outputs
+
+**New in 0.3.0**: `lax.scan` body functions return per-step output values (`ys`)
+in addition to the carry. Y-taps observe these outputs live, using the same
+`select` / `alert` machinery as carry taps, but with separate callbacks
+(`on_ys` / `alert_ys`). A common use: live tripwires on adaptive sampler
+info (e.g., NUTS tree depth saturation).
+
+```python
+import jax
+import jax.lax as lax
+import jax.numpy as jnp
+import jaxtap as tap
+from collections import namedtuple
+
+# Example: NUTS sampler with live tree-depth monitoring
+NUTSInfo = namedtuple("NUTSInfo", ["is_divergent", "treedepth"])
+
+def sampler(init_x, n_steps):
+    """Adaptive sampler returning per-step NUTSInfo as ys."""
+    def body(chain_state, step_idx):
+        # chain_state: the carry (updated each step)
+        # ys: NUTSInfo (per-step sampler info)
+        new_state = chain_state + 0.1
+        is_div = step_idx > n_steps // 2  # divergence flag
+        td = 2.0 ** (step_idx % 5)  # tree depth
+        return new_state, NUTSInfo(is_divergent=is_div, treedepth=td)
+
+    return lax.scan(body, init_x, jnp.arange(n_steps))
+
+# Canonical recipe: live tripwire on saturation
+# NUTSInfo leaves (alphabetical dict order / namedtuple field order):
+# [0] = is_divergent, [1] = treedepth
+with tap.record(
+    select_ys=lambda ys_leaves: ys_leaves[1],  # extract treedepth
+    alert_ys=lambda e: (
+        f"output: treedepth saturated at step {e.step}"
+        if float(e.value) >= 8.0 else False
+    ),
+    alert_ys_once=True,  # alert only on first occurrence
+) as rec:
+    result, ys_stream = sampler(jnp.float32(0.0), 100)
+
+# Output to stderr (live, on first saturation):
+# [tap] FAIL scan[0] 23/100: output: treedepth saturated at step 23
+
+# Inspect captured output events
+output_events = [e for e in rec.events if e.kind == "output"]
+print(f"Recorded {len(output_events)} per-step outputs")
+```
+
+**Key points**
+
+- **Separate from carry taps**: `on_ys` receives output events only;
+  `on_step` receives carry events only. Both may be set; they fire independently.
+- **Flat-leaves indexing**: `select_ys` receives a flat tuple of ys leaves
+  (pytree structure is erased by tracing, same as `select` for carry).
+  To index into `NUTSInfo`: leaves follow field order
+  (namedtuple fields in declaration order; dict keys sorted alphabetically).
+  Inspect with `jax.tree_util.tree_leaves(example_y)`.
+- **Scan-only**: y-taps apply to `lax.scan` only (which has per-step outputs);
+  `lax.while_loop` has no ys and produces no y-tap events.
+- **Mixed streams**: `rec.events` holds both carry and output events in a single
+  list. Filter with `e.kind == "output"` to separate them.
+- **`df()` unchanged**: `.df()` continues to skip `kind` / `total` columns.
+  To include them, build a DataFrame directly from `rec.events`.
+- **Self-identifying messages**: carry and output alerts share the same stderr
+  format `[tap] FAIL {path} {step}/{total}: {msg}`. Include `"output:"` or a
+  field name in `alert_ys` messages to distinguish from carry alerts in log grep.
+
 ## What the first call tells you
 
 The first call to a jitted function pays trace + compile + execute in one opaque wall-time block. Naive profiling attributes it all to compilation — but **the first tap event's arrival timestamp IS the compile/execute boundary**.
