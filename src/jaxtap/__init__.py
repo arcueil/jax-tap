@@ -702,6 +702,37 @@ def verbose(
         tapped = tap.verbose(f, alert=lambda e: e.step == 0)
         result = tapped(*args)  # no on_step callback, only alert fires
 
+    Tap per-step scan outputs (y-taps) — live tripwire on NUTS tree depth::
+
+        # Canonical use case: monitor adaptive sampler per-step info (NUTSInfo).
+        # ys_leaves[1] = treedepth (namedtuple field order: is_div, treedepth).
+        tapped = tap.verbose(
+            sampler,
+            select_ys=lambda ys_leaves: ys_leaves[1],  # extract treedepth
+            alert_ys=lambda e: (
+                f"output: treedepth saturated at step {e.step}"
+                if float(e.value) >= 10.0 else False
+            ),
+            alert_ys_once=True,  # silence after first hit
+        )
+        result = tapped(*args)
+        # stderr (if treedepth ever reaches 10.0):
+        # [tap] FAIL scan[0] 7/1000: output: treedepth saturated at step 7
+
+    Both carry and output taps on the same scan::
+
+        carry_events = []
+        output_events = []
+        tapped = tap.verbose(
+            f,
+            on_step=lambda e: carry_events.append(e),
+            on_ys=lambda e: output_events.append(e),
+            select_ys=lambda ys_leaves: {"field": ys_leaves[0]},
+        )
+        result = tapped(*args)
+        # carry_events: kind="carry" (loop state each step)
+        # output_events: kind="output" (scan ys each step)
+
     Notes
     -----
     **vmap × while_loop carry taps**: when ``f`` contains a ``while_loop``
