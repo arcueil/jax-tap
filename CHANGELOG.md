@@ -40,9 +40,9 @@ not in `ops`.
 progress-bar idiom) produce zero output events — the `len(ys) > 0` guard in
 `rewrite_scan.body_fn` is a Python trace-time check with zero device overhead.
 
-**JSONL note:** `JSONLWriter` does not serialize `kind`; round-tripped events
-default to `kind="carry"`.  Consumers who need `kind` in a JSONL stream
-should add it to their serialization layer.
+**JSONL note (0.3.0):** `JSONLWriter` now serializes `TapEvent.kind` under
+the key `"kind"`; `read_jsonl` restores it with default `"carry"` for
+pre-0.3.0 files that lack the field.
 
 **Canonical treedepth tripwire:**
 

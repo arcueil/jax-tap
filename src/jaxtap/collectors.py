@@ -126,6 +126,12 @@ class FlightRecorder:
               - Individual keys (e.g., ``a``, ``b``) : present when the value
                 is a dict
 
+        Notes
+        -----
+        With mixed carry/output events, ``df()`` does not distinguish kind —
+        filter ``[e for e in rec.events if e.kind == "output"]`` first if you
+        need separation.
+
         Raises
         ------
         ImportError
