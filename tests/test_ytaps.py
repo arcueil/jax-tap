@@ -494,12 +494,15 @@ def test_while_only_ytap_no_events():
         return lax.while_loop(cond, body, carry_init)
 
     y_events = []
-    tapped = tap.verbose(
-        f,
-        on_ys=lambda e: y_events.append(e),
-        select_ys=lambda ys_leaves: ys_leaves,
-        ops=("while_loop",),
-    )
+    # select_ys on a while-only function emits a UserWarning (no effect: while
+    # has no per-step ys). Expect it here so the suite is clean under -W error.
+    with pytest.warns(UserWarning, match="select_ys has no effect"):
+        tapped = tap.verbose(
+            f,
+            on_ys=lambda e: y_events.append(e),
+            select_ys=lambda ys_leaves: ys_leaves,
+            ops=("while_loop",),
+        )
     tapped(jnp.int32(0))
 
     assert len(y_events) == 0

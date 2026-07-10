@@ -49,3 +49,8 @@ exclude = ["src/jaxtap/_version\\.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Warnings are errors in the regular suite too (not just the nightly canary),
+# so an unhandled warning fails at merge instead of surfacing days later on
+# JAX head. Tests that exercise a warn path must use pytest.warns(). JAX-head
+# deprecations remain the nightly canary's job (it pins nothing).
+filterwarnings = ["error"]
