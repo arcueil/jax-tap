@@ -864,9 +864,13 @@ def test_bform_vmap_while_no_crash_and_bitwise():
 
     After fix: no crash; 0 while carry taps (opaque bind); output identical.
     This is the MINIMAL repro from the issue report.
+
+    Tests both integer and float carry: float catch rounding differences that
+    integer equality would mask.  Uses a float while that actually runs
+    (cond: c > 0.1, body: c * 0.5) so the output is non-trivial.
     """
 
-    def f(s):
+    def f_int(s):
         def cond(c):
             return c < 5
 
@@ -875,20 +879,44 @@ def test_bform_vmap_while_no_crash_and_bitwise():
 
         return jax.lax.while_loop(cond, body, s)
 
-    vmapped_f = jax.vmap(f)
-    init = jnp.zeros(4, dtype=jnp.int32)
+    vmapped_int = jax.vmap(f_int)
+    init_int = jnp.zeros(4, dtype=jnp.int32)
+    ref_int = vmapped_int(init_int)
+    events_int: list = []
+    got_int = tap.verbose(vmapped_int, on_step=events_int.append)(init_int)
+    jax.block_until_ready(got_int)
 
-    ref = vmapped_f(init)
-    events: list = []
-    got = tap.verbose(vmapped_f, on_step=events.append)(init)
-    jax.block_until_ready(got)
-
-    np.testing.assert_array_equal(
-        got, ref, err_msg="B-form vmap×while output not bitwise identical"
+    assert np.asarray(ref_int).tobytes() == np.asarray(got_int).tobytes(), (
+        "B-form vmap×while (int): output not bitwise identical"
     )
-    while_events = [e for e in events if "while" in e.path]
-    assert len(while_events) == 0, (
-        f"B-form vmap×while: expected 0 while carry taps (opaque bind), got {len(while_events)}"
+    assert len([e for e in events_int if "while" in e.path]) == 0, (
+        "B-form vmap×while (int): expected 0 while carry taps (opaque bind)"
+    )
+
+    # Float carry: different init values per lane, while runs non-trivially.
+    # Any spurious computation inside the opaque-bound while would change bits.
+    def f_float(s):
+        def cond(c):
+            return c > 0.1
+
+        def body(c):
+            return c * 0.5
+
+        return jax.lax.while_loop(cond, body, s)
+
+    vmapped_float = jax.vmap(f_float)
+    init_float = jnp.array([2.0, 4.0, 0.5, 8.0], dtype=jnp.float32)
+    ref_float = vmapped_float(init_float)
+    events_float: list = []
+    got_float = tap.verbose(vmapped_float, on_step=events_float.append)(init_float)
+    jax.block_until_ready(got_float)
+
+    assert np.asarray(ref_float).tobytes() == np.asarray(got_float).tobytes(), (
+        f"B-form vmap×while (float): output not bitwise identical; "
+        f"ref={np.asarray(ref_float).tolist()} got={np.asarray(got_float).tolist()}"
+    )
+    assert len([e for e in events_float if "while" in e.path]) == 0, (
+        "B-form vmap×while (float): expected 0 while carry taps (opaque bind)"
     )
 
 
@@ -986,4 +1014,165 @@ def test_bform_nested_vmap_while_no_crash():
     while_events = [e for e in events if "while" in e.path]
     assert len(while_events) == 0, (
         f"B-form nested-vmap×while: expected 0 while taps, got {len(while_events)}"
+    )
+
+
+def test_bform_vmap_while_opaque_bind_blast_radius_prim_tap():
+    """Opaque bind suppresses ALL taps inside the vmap-batched while subtree.
+
+    The opaque bind doesn't just suppress while carry taps — it suppresses the
+    entire B-form descent into the while's body and cond jaxprs.  A prim-tap
+    on 'add' (the primitive inside the while body) fires in a normal (non-vmap)
+    while but fires 0 times inside a vmap-batched while.
+
+    Control: tap.on('add') fires in a plain (scalar) while.
+    Subject: tap.on('add') is silent when the while is vmap-batched.
+    """
+
+    def f(s):
+        def cond(c):
+            return c < 5
+
+        def body(c):
+            return c + 1
+
+        return jax.lax.while_loop(cond, body, s)
+
+    # Control: add prim fires in the non-vmap while (proves the API works).
+    events_scalar: list = []
+    tap.verbose(f, on_step=events_scalar.append, taps=[tap.on("add")])(jnp.int32(0))
+    assert len(events_scalar) > 0, (
+        "Control: tap.on('add') should fire in a plain while_loop"
+    )
+
+    # Subject: same function, but vmapped — add prim is inside the opaque-bound subtree.
+    vmapped_f = jax.vmap(f)
+    init = jnp.zeros(4, dtype=jnp.int32)
+    ref = vmapped_f(init)
+    events_vmap: list = []
+    got = tap.verbose(vmapped_f, on_step=events_vmap.append, taps=[tap.on("add")])(init)
+    jax.block_until_ready(got)
+
+    assert np.asarray(ref).tobytes() == np.asarray(got).tobytes(), (
+        "Blast radius test: output must be bitwise identical"
+    )
+    assert len(events_vmap) == 0, (
+        f"Opaque bind blast radius: expected 0 events (all taps in vmap-batched "
+        f"while subtree suppressed), got {len(events_vmap)}"
+    )
+
+
+def test_bform_vmap_while_opaque_bind_blast_radius_nested_scan():
+    """Opaque bind blast radius: a scan nested INSIDE a vmapped while body is suppressed.
+
+    A scan inside a normal while body would produce carry-tap events.  When
+    the enclosing while is vmap-batched, the entire subtree — including the
+    inner scan — is opaquely bound and emits no events.
+
+    Note: the test function f(while(scan)) nests scan INSIDE while; compare
+    with test_bform_vmap_scan_while_no_crash_and_scan_taps which nests while
+    INSIDE scan.  The suppression direction matters: the opaque-bound node is
+    always the outermost while with a vmap-batched cond.
+    """
+
+    def f(s):
+        def cond(c):
+            return c < 6
+
+        def body(c):
+            # scan inside the while body — would fire events in a normal while
+            result, _ = jax.lax.scan(lambda a, _: (a + 1, None), c, None, length=2)
+            return result
+
+        return jax.lax.while_loop(cond, body, s)
+
+    vmapped_f = jax.vmap(f)
+    init = jnp.zeros(4, dtype=jnp.int32)
+    ref = vmapped_f(init)
+    events: list = []
+    got = tap.verbose(vmapped_f, on_step=events.append)(init)
+    jax.block_until_ready(got)
+
+    assert np.asarray(ref).tobytes() == np.asarray(got).tobytes(), (
+        "Blast radius (nested scan): output must be bitwise identical"
+    )
+    scan_in_while = [e for e in events if "scan" in e.path]
+    while_ev = [e for e in events if "while" in e.path]
+    assert len(scan_in_while) == 0, (
+        f"Blast radius: nested scan inside vmap-batched while emitted {len(scan_in_while)} events"
+    )
+    assert len(while_ev) == 0, (
+        f"Blast radius: vmap-batched while emitted {len(while_ev)} carry events"
+    )
+
+
+def test_aform_vmap_scan_while_consumer_path():
+    """A-form `with tap.record():` around jax.vmap(scan(while)) — NOT pre-jitted.
+
+    This is the primary consumer path for tuningfork: the vmapped HMC/NUTS
+    sampler is called INSIDE a record() context before any jit-cache is
+    populated.  The A-form intercepts at the scalar-in-vmap level, so scan
+    AND while taps both fire per-lane (4 lanes × 3 steps = 12 scan events;
+    4 iterations × 4 lanes = 16 while events at scan-step 0).  Output is
+    bitwise identical.
+
+    Pre-jit caveat: if the vmapped function is called with jax.jit() OUTSIDE
+    a record() context first, the jit-compiled artifact has no callbacks and
+    subsequent calls inside record() emit 0 events.  Consumers must ensure the
+    first compilation happens inside a record() context — or use the B-form
+    instead (tap.verbose(jax.vmap(f))), which taps at the batched-jaxpr level
+    and always fires scan carry taps regardless of prior jit compilation.
+    """
+
+    scan_length = 3
+    batch_size = 4
+
+    def outer(s):
+        def body(state, _):
+            def inner_body(c):
+                return c + 1
+
+            def inner_cond(c):
+                return c < 4
+
+            return jax.lax.while_loop(inner_cond, inner_body, state), None
+
+        return jax.lax.scan(body, s, None, length=scan_length)
+
+    vmapped_outer = jax.vmap(outer)
+    init = jnp.zeros(batch_size, dtype=jnp.int32)
+    ref = vmapped_outer(init)
+
+    events_aform: list = []
+    with tap.record(on_step=events_aform.append):
+        got = vmapped_outer(init)  # first call: traced with A-form active
+    jax.block_until_ready(got)
+
+    # Output must be bitwise identical.
+    assert np.asarray(ref[0]).tobytes() == np.asarray(got[0]).tobytes(), (
+        f"A-form vmap×scan(while): output not bitwise identical; "
+        f"ref={np.asarray(ref[0]).tolist()} got={np.asarray(got[0]).tolist()}"
+    )
+
+    # A-form fires per-lane (scalar intercept inside vmap trace):
+    #   scan: scan_length × batch_size = 3×4 = 12 events, each scalar carry
+    #   while: batch_size × (while iterations at step 0) = 4×4 = 16 events
+    scan_events = [e for e in events_aform if e.path == "scan[0]"]
+    while_events = [e for e in events_aform if "while" in e.path]
+    assert len(scan_events) == scan_length * batch_size, (
+        f"A-form: expected {scan_length * batch_size} per-lane scan events, "
+        f"got {len(scan_events)}"
+    )
+    # Scan carry values are scalars (per-lane), not batched arrays.
+    for ev in scan_events:
+        carry = ev.value[0]
+        assert not hasattr(carry, "shape") or carry.shape == (), (
+            f"A-form scan carry tap should be scalar (per-lane), got shape {carry.shape}"
+        )
+    # While taps fire per-lane during scan step 0 (all 4 lanes iterate 4 times:
+    # c in {0,1,2,3} → 4 while-carry events × 4 lanes = 16).  Steps 1 and 2
+    # have carry=4 so the while exits immediately (0 events).
+    expected_while = 4 * batch_size  # 4 iterations × 4 lanes at step 0
+    assert len(while_events) == expected_while, (
+        f"A-form: expected {expected_while} per-lane while events, got {len(while_events)}"
     )
