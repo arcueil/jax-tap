@@ -15,20 +15,26 @@
 """
 Router max_depth filter regression tests (issue #2).
 
-The dynamic router must apply the RECEIVING context's max_depth to events that
-arrive via a jit-cache hit from a foreign trace baked at a different max_depth.
+The dynamic router must apply the RECEIVING context's max_depth to carry-tap
+events that arrive via a jit-cache hit from a foreign trace baked at a
+different max_depth.
 
 Bug: a function compiled under ``tap.record(max_depth=None)`` bakes the router
 at the original (no-limit) depth.  Calling that compiled artifact inside a
-second ``tap.record(max_depth=0)`` used to route ALL-depth events to the
-receiving recorder — ~50× host-callback waste for NUTS-style programs.
+second ``tap.record(max_depth=0)`` used to route ALL-depth carry events to the
+receiving recorder — ~50x host-callback waste for NUTS-style programs.
 
-Fix location: ``_dynamic_router`` in src/jaxtap/_ashell.py — a host-side filter
-  ``if ctx._max_depth is not None and event.path.count("/") > ctx._max_depth``
-applied BEFORE alert/recorder/on_step firing.
+Fix: ``_dynamic_router`` applies the receiving context's max_depth host-side,
+but ONLY to carry events (last path segment ``scan[k]`` or ``while[k]``).
+Primitive-tap events (``taps=[tap.on(...)]``, ``tap.watch_nan()``) pass through
+regardless of depth — the walker has no device-side max_depth gate for prim-taps
+(walker.py:596-609), so the router must not add one either.  Silently filtering
+prim-taps would kill NaN tripwires for consumers that combine max_depth=0
+(blackjax issue-#5 dodge) with watch_nan.
 
 Depth measure: ``event.path.count("/")`` — exactly the measure the walker uses
-(_walker.py, lines 423, 444: ``depth = here.count("/")``, filter ``depth <= max_depth``).
+(_walker.py, lines 423, 444: ``depth = here.count("/")``, filter
+``depth <= max_depth``).
 
 Run with: uv run pytest tests/test_router_maxdepth.py -v
 """
@@ -41,7 +47,7 @@ import jax.numpy as jnp
 import jaxtap as tap
 
 # ---------------------------------------------------------------------------
-# Shared helper: a two-level nested scan
+# Shared helpers
 # ---------------------------------------------------------------------------
 
 N_OUTER = 4
@@ -51,9 +57,9 @@ N_INNER = 3
 def _nested_scan(x0):
     """Outer scan (N_OUTER steps) with an inner scan (N_INNER steps) in the body.
 
-    Path layout:
-      depth-0 events: ``scan[0]``          (N_OUTER per call)
-      depth-1 events: ``scan[0]/scan[0]``  (N_OUTER * N_INNER per call)
+    Path layout (carry events only — no prim taps in this helper):
+      depth-0 carry: ``scan[0]``          (N_OUTER per call)
+      depth-1 carry: ``scan[0]/scan[0]``  (N_OUTER * N_INNER per call)
     """
     inner_xs = jnp.arange(float(N_INNER), dtype=jnp.float32)
 
@@ -64,25 +70,42 @@ def _nested_scan(x0):
     return jax.lax.scan(outer_body, x0, jnp.zeros(N_OUTER, dtype=jnp.float32))
 
 
+N_STEPS = 4  # scan length for prim-tap helpers
+
+
+def _scan_with_sin(x0):
+    """Scan with a sin primitive in the body.
+
+    With taps=[tap.on("sin")]:
+      depth-0 carry: ``scan[0]``       (N_STEPS per call)
+      depth-1 prim:  ``scan[0]/sin[0]`` (N_STEPS per call)
+    """
+
+    def body(c, x):
+        return c * 1.01 + jnp.sin(x), None
+
+    return jax.lax.scan(body, x0, jnp.arange(float(N_STEPS)))[0]
+
+
 # ---------------------------------------------------------------------------
 # 1. Repro — regression test for issue #2
 #
 # Compile under max_depth=None, call inside max_depth=0.
-# Receiving recorder must see ONLY depth-0 events (N_OUTER), not the inflated
-# all-depth count (N_OUTER + N_OUTER * N_INNER = 4 + 12 = 16).
+# Receiving recorder must see ONLY depth-0 CARRY events (N_OUTER), not the
+# inflated all-depth count (N_OUTER + N_OUTER * N_INNER = 4 + 12 = 16).
 # ---------------------------------------------------------------------------
 
 
-def test_router_maxdepth_cache_hit_filters_deep_events():
-    """Cache-hit events from a max_depth=None trace are filtered by the receiving
-    context's max_depth=0: only outer-scan (depth-0) events reach the recorder."""
+def test_router_maxdepth_cache_hit_filters_deep_carry_events():
+    """Cache-hit carry events from a max_depth=None trace are filtered by the
+    receiving context's max_depth=0: only outer-scan (depth-0) carry events
+    reach the recorder."""
     x0 = jnp.float32(1.0)
 
     # Compile and warm up under an unconstrained context (max_depth=None).
     with tap.record() as _compile_rec:
         f_jit = jax.jit(_nested_scan)
         jax.block_until_ready(f_jit(x0))
-    # After exit, flush any pending callbacks from the compilation context.
     jax.effects_barrier()
 
     # Now call the already-compiled artifact inside a context with max_depth=0.
@@ -92,11 +115,13 @@ def test_router_maxdepth_cache_hit_filters_deep_events():
 
     all_events = rec.events
     depth0 = [e for e in all_events if e.path == "scan[0]"]
-    deep = [e for e in all_events if e.path.count("/") > 0]
+    deep_carry = [
+        e for e in all_events if e.path.count("/") > 0 and e.path.endswith("]")
+    ]
 
-    assert len(deep) == 0, (
-        f"max_depth=0 receiving context must receive 0 deep events; "
-        f"got {len(deep)}: {[e.path for e in deep]}"
+    assert len(deep_carry) == 0, (
+        f"max_depth=0 receiving context must receive 0 deep carry events; "
+        f"got {len(deep_carry)}: {[e.path for e in deep_carry]}"
     )
     assert len(depth0) == N_OUTER, (
         f"receiving context must still see {N_OUTER} depth-0 events; got {len(depth0)}"
@@ -107,18 +132,18 @@ def test_router_maxdepth_cache_hit_filters_deep_events():
 # 2. Cross-consumer alert variant
 #
 # Receiving context has max_depth=0 AND an alert that would fire on deep-path
-# events if the filter were absent.  The alert must NOT fire for filtered events.
+# carry events if the filter were absent.  The alert must NOT fire for
+# filtered carry events.
 # ---------------------------------------------------------------------------
 
 
-def test_router_maxdepth_alert_not_fired_for_filtered_events(capsys):
+def test_router_maxdepth_alert_not_fired_for_filtered_carry_events(capsys):
     """Alert registered on the receiving context (max_depth=0) must not fire for
-    deep events that are filtered out by the max_depth host-side filter."""
+    deep carry events that are filtered out by the max_depth host-side filter."""
     x0 = jnp.float32(1.0)
     alert_fired: list[str] = []
 
     def alert_fn(event: tap.TapEvent):
-        # Would fire on ANY event that slips through; we record the path.
         alert_fired.append(event.path)
         return True  # always "truthy" → would emit a FAIL line
 
@@ -133,25 +158,25 @@ def test_router_maxdepth_alert_not_fired_for_filtered_events(capsys):
         jax.block_until_ready(f_jit(x0))
     jax.effects_barrier()
 
-    deep_alerts = [p for p in alert_fired if p.count("/") > 0]
-    assert len(deep_alerts) == 0, (
-        f"alert must not fire for filtered deep events; fired on: {deep_alerts}"
+    deep_carry_alerts = [
+        p
+        for p in alert_fired
+        if p.count("/") > 0 and p.rsplit("/", 1)[-1].startswith(("scan[", "while["))
+    ]
+    assert len(deep_carry_alerts) == 0, (
+        f"alert must not fire for filtered deep carry events; fired on: {deep_carry_alerts}"
     )
 
-    # Alert MAY fire for depth-0 events (not our concern here), but it must
-    # not fire for anything deeper.
     captured = capsys.readouterr()
-    fail_lines = [
-        ln
-        for ln in captured.err.splitlines()
-        if ln.startswith("[tap] FAIL") and "/" in ln.split()[2]
-    ]
-    # FAIL lines contain the path; check none reference a deep path.
-    for ln in fail_lines:
-        path_token = ln.split()[2]  # third word is the path
-        assert path_token.count("/") == 0, (
-            f"FAIL line references a deep path that should have been filtered: {ln!r}"
-        )
+    # No FAIL line should reference a deep carry path.
+    for ln in captured.err.splitlines():
+        if not ln.startswith("[tap] FAIL"):
+            continue
+        path_token = ln.split()[2]
+        if path_token.rsplit("/", 1)[-1].startswith(("scan[", "while[")):
+            assert path_token.count("/") == 0, (
+                f"FAIL line references a deep carry path that should have been filtered: {ln!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -162,8 +187,8 @@ def test_router_maxdepth_alert_not_fired_for_filtered_events(capsys):
 
 
 def test_router_maxdepth_none_delivers_all_events():
-    """Single context with max_depth=None: depth-0 AND depth-1 events are all delivered
-    (filter is never triggered)."""
+    """Single context with max_depth=None: depth-0 AND depth-1 carry events are
+    all delivered (filter is never triggered)."""
     x0 = jnp.float32(1.0)
 
     with tap.record(max_depth=None) as rec:
@@ -186,17 +211,15 @@ def test_router_maxdepth_none_delivers_all_events():
 # 3b. No-regression: trace and receiving max_depth agree — count unchanged
 #
 # When compiled AND called under the same max_depth=0, only depth-0 events
-# are emitted device-side; the host filter adds nothing new and the count
-# must match what the device emits (N_OUTER).
+# are emitted device-side; the host filter adds nothing new.
 # ---------------------------------------------------------------------------
 
 
 def test_router_maxdepth_same_context_count_unchanged():
     """When trace-time and receiving max_depth both equal 0, event count is the
-    same as without the router fix — no events are newly dropped."""
+    same as without the router fix — no carry events are newly dropped."""
     x0 = jnp.float32(1.0)
 
-    # Clear any prior cached artifact to ensure a fresh trace at max_depth=0.
     jax.clear_caches()
 
     with tap.record(max_depth=0) as rec:
@@ -216,28 +239,17 @@ def test_router_maxdepth_same_context_count_unchanged():
 
 
 # ---------------------------------------------------------------------------
-# 4. Alert-once budget: filtered events must not consume _carry_once_fired
-#
-# alert_once limits the FAIL stderr line to one per path.  alert_fn itself is
-# called for each delivered event; _carry_once_fired is populated on the first
-# truthy return.  The early `return` in _dynamic_router (before _carry_alert_fn)
-# means filtered deep events never call alert_fn and never touch the once-set.
-# A legit depth-0 event must therefore still produce its FAIL line even when
-# deep events arrive on the same run.
+# 4. Alert-once budget: filtered carry events must not consume _carry_once_fired
 # ---------------------------------------------------------------------------
 
 
 def test_router_maxdepth_filtered_events_do_not_consume_alert_once_budget(capsys):
-    """alert_once budget is not pre-consumed by filtered deep events.
+    """alert_once budget is not pre-consumed by filtered deep carry events.
 
-    Compile under max_depth=None so the XLA artifact bakes full-depth callbacks.
-    Call under max_depth=0, alert_once=True, always-truthy alert.
-
-    Expected:
-      - alert_fn is NOT called for any filtered deep event (early return before
-        _carry_alert_fn — the once budget is never touched by them).
-      - alert_fn IS called for each depth-0 event (N_OUTER times).
-      - exactly 1 FAIL line is written to stderr (alert_once limits output).
+    Compile under max_depth=None. Call under max_depth=0, alert_once=True,
+    always-truthy alert.  Filtered deep carry events must not call alert_fn
+    (early return before _carry_alert_fn) and must not touch _carry_once_fired.
+    A legit depth-0 event must still produce its FAIL line.
     """
     x0 = jnp.float32(1.0)
     alert_calls: list[str] = []
@@ -246,7 +258,6 @@ def test_router_maxdepth_filtered_events_do_not_consume_alert_once_budget(capsys
         alert_calls.append(event.path)
         return True
 
-    # Compile under no depth limit so the artifact emits at all depths.
     jax.clear_caches()
     with tap.record():
         f_jit = jax.jit(_nested_scan)
@@ -262,21 +273,95 @@ def test_router_maxdepth_filtered_events_do_not_consume_alert_once_budget(capsys
     deep_alert_calls = [p for p in alert_calls if p.count("/") > 0]
     depth0_alert_calls = [p for p in alert_calls if p.count("/") == 0]
 
-    # Filtered deep events must not reach alert_fn at all.
-    assert len(deep_events) == 0, "deep events must be filtered from recorder"
+    assert len(deep_events) == 0, "deep carry events must be filtered from recorder"
     assert len(deep_alert_calls) == 0, (
-        f"alert_fn must not be called for filtered deep events; called on: {deep_alert_calls}"
+        f"alert_fn must not be called for filtered deep carry events; called on: {deep_alert_calls}"
     )
-    # Depth-0 events are delivered; alert_fn fires N_OUTER times.
     assert len(depth0_events) == N_OUTER, (
         f"expected {N_OUTER} depth-0 events; got {len(depth0_events)}"
     )
     assert len(depth0_alert_calls) == N_OUTER, (
         f"alert_fn must be called for each depth-0 event; got {len(depth0_alert_calls)}"
     )
-    # alert_once: exactly 1 FAIL line for the depth-0 path.
     captured = capsys.readouterr()
     fail_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[tap] FAIL")]
     assert len(fail_lines) == 1, (
         f"alert_once must produce exactly 1 FAIL line; got: {fail_lines}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 5. Prim-tap survival: same-context max_depth=0 + tap.on(...)
+#
+# Regression guard for the AYS-2 finding: the router filter MUST NOT apply
+# to primitive-tap events.  The walker has no device-side max_depth gate for
+# prim-taps (walker.py:596-609); filtering them host-side would silently kill
+# NaN tripwires for consumers that pair max_depth=0 with tap.watch_nan / tap.on.
+#
+# Before the scoped fix, the router applied max_depth to ALL events; a sin
+# prim at scan[0]/sin[0] (depth=1) under max_depth=0 was silently dropped.
+# ---------------------------------------------------------------------------
+
+
+def test_router_prim_tap_survives_same_context_max_depth():
+    """Prim-tap events (tap.on) at depth > max_depth must still reach the recorder
+    in a same-context trace — max_depth only gates carry events, not prim-taps."""
+    x0 = jnp.float32(1.0)
+
+    jax.clear_caches()
+
+    with tap.record(max_depth=0, taps=[tap.on("sin")]) as rec:
+        f_jit = jax.jit(_scan_with_sin)
+        jax.block_until_ready(f_jit(x0))
+    jax.effects_barrier()
+
+    carry = [e for e in rec.events if e.path == "scan[0]"]
+    prim = [e for e in rec.events if "sin" in e.path]
+
+    assert len(carry) == N_STEPS, (
+        f"expected {N_STEPS} carry events at scan[0]; got {len(carry)}"
+    )
+    assert len(prim) == N_STEPS, (
+        f"prim-tap events at scan[0]/sin[0] must NOT be filtered by max_depth=0; "
+        f"got {len(prim)} (expected {N_STEPS}). "
+        f"This is the AYS-2 regression: router was incorrectly dropping prim-taps."
+    )
+    # Confirm the prim-tap path is exactly what we expect (depth=1, past max_depth).
+    prim_paths = {e.path for e in prim}
+    assert prim_paths == {"scan[0]/sin[0]"}, f"unexpected prim-tap paths: {prim_paths}"
+
+
+# ---------------------------------------------------------------------------
+# 6. Prim-tap survival: cache-hit under max_depth=0
+#
+# The baked prim-tap callback routes through _dynamic_router at call time.
+# A prim-tap event (depth=1) on a foreign-trace cache-hit under max_depth=0
+# must still reach the receiving recorder.
+# ---------------------------------------------------------------------------
+
+
+def test_router_prim_tap_survives_cache_hit_max_depth():
+    """Prim-tap events from a foreign-trace cache-hit must not be filtered by the
+    receiving context's max_depth=0 — carry-only scoping applies to the router."""
+    x0 = jnp.float32(1.0)
+
+    # Compile under no depth limit with prim-taps baked in.
+    jax.clear_caches()
+    with tap.record(taps=[tap.on("sin")]):
+        f_jit = jax.jit(_scan_with_sin)
+        jax.block_until_ready(f_jit(x0))
+    jax.effects_barrier()
+
+    # Call the cached artifact under a stricter max_depth=0 context.
+    with tap.record(max_depth=0, taps=[tap.on("sin")]) as rec:
+        jax.block_until_ready(f_jit(x0))
+    jax.effects_barrier()
+
+    carry = [e for e in rec.events if e.path == "scan[0]"]
+    prim = [e for e in rec.events if "sin" in e.path]
+
+    assert len(carry) == N_STEPS, f"expected {N_STEPS} carry events; got {len(carry)}"
+    assert len(prim) == N_STEPS, (
+        f"prim-tap events must survive cache-hit under max_depth=0; "
+        f"got {len(prim)} (expected {N_STEPS})"
     )

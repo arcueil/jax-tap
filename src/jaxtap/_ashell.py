@@ -410,22 +410,39 @@ def _dynamic_router(event: Any) -> None:
         _guard_fn = _g
         _carry_alert_fn = _fca
 
-    # Host-side max_depth filter for cache-hit events from a foreign trace.
+    # Host-side max_depth filter for carry-tap events from a foreign trace.
     #
     # On a jit-cache hit, the baked XLA artifact emits at the ORIGINAL context's
     # max_depth (baked device-side by verbose's walker).  The receiving context
     # may have a STRICTER max_depth — we must re-apply it here before firing
     # anything (alert included, matching the A1 ghost-drop-before-alert principle).
     #
-    # Depth measure: event.path.count("/") — exactly the measure the walker uses
-    # (_walker.py, `depth = here.count("/")`, filter `depth <= max_depth`).
-    # Keeping both measures identical ensures the host filter is consistent with
-    # the device-side emission filter for same-context calls.
+    # CARRY EVENTS ONLY.  max_depth gates carry-tap emission in the walker
+    # (_walker.py:428: `max_depth is None or depth <= max_depth`).  Primitive
+    # taps (taps=[tap.on(...)], tap.watch_nan()) have NO device-side max_depth
+    # gate (walker.py:596-609) — so the router must not filter them either.
+    # Silently dropping prim-taps under max_depth would kill NaN tripwires for
+    # consumers that combine max_depth=0 (blackjax issue-#5 dodge) with watch_nan.
     #
-    # None-check short-circuits on the common path (no max_depth configured) at
-    # near-zero cost.
+    # Discriminator: carry events end in scan[k] or while[k] (only
+    # rewrite_scan/rewrite_while call tap_cb with `here` — rewrites.py:134,236).
+    # Prim-tap events end in a non-boundary primitive name (sin[0], cholesky[0],
+    # …), guaranteed by the walker's else-branch at line 589.  The path-prefix
+    # check is reliable and needs no import from _walker (which imports
+    # suppress_interception from _ashell — circular at module load time).
+    #
+    # FORWARD NOTE (y-taps 0.3.0): when the `kind` field lands on TapEvent,
+    # replace this discriminator with `event.kind != "primitive"` — cleaner
+    # and robust.  Also note: future y-tap events will end in scan[k] (scan-
+    # boundary depth), so they WOULD be filtered by this check — which is the
+    # correct behavior for them, but the 0.3.0 implementer should revisit
+    # deliberately when switching to the kind-field discriminator.
+    #
+    # None-check short-circuits on the common path (no max_depth configured).
     if ctx._max_depth is not None and event.path.count("/") > ctx._max_depth:
-        return
+        last_seg = event.path.rsplit("/", 1)[-1]
+        if last_seg.startswith(("scan[", "while[")):
+            return
 
     # alert fires BEFORE on_step/recorder — matching verbose() ordering.
     # Using the ACTIVE context's alert and once-set means cache hits in a new
