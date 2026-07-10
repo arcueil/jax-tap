@@ -1176,3 +1176,162 @@ def test_aform_vmap_scan_while_consumer_path():
     assert len(while_events) == expected_while, (
         f"A-form: expected {expected_while} per-lane while events, got {len(while_events)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# AYS-2: predicate false-positive / false-negative boundary tests
+# ---------------------------------------------------------------------------
+
+
+def test_predicate_false_positive_vector_carry_scalar_cond():
+    """FALSE-POSITIVE guard: non-vmap while with vector carry + scalar cond taps fire.
+
+    The detection predicate keys on `cond_jaxpr.outvars[0].aval.ndim > 0` —
+    the COND OUTPUT shape, NOT the carry shape.  A while with vector carry
+    (e.g. shape (8,)) and a scalar reducing cond (jnp.linalg.norm(carry) < tol)
+    has ndim=0 → predicate False → rewrite_while runs → A1 carry-taps fire.
+
+    If the predicate mistakenly keyed on carry shape, these taps would be
+    wrongly suppressed (opaque bind) — this test would fail.
+
+    Also tests `c[0] < 5` (index into vector carry → scalar output) to confirm
+    the boundary: it's always the cond OUTPUT that matters.
+    """
+
+    # Case A: vector carry, norm-based scalar cond.
+    def f_norm(c):
+        def cond(carry):
+            return jnp.linalg.norm(carry) < 5.0
+
+        def body(carry):
+            return carry + 0.5
+
+        return jax.lax.while_loop(cond, body, c)
+
+    init_norm = jnp.zeros(8, dtype=jnp.float32)
+    ref_norm = f_norm(init_norm)
+    events_norm: list = []
+    got_norm = tap.verbose(f_norm, on_step=events_norm.append)(init_norm)
+    jax.block_until_ready(got_norm)
+
+    assert np.asarray(ref_norm).tobytes() == np.asarray(got_norm).tobytes(), (
+        "vector-carry norm-cond: output not bitwise identical"
+    )
+    while_ev_norm = [e for e in events_norm if "while" in e.path]
+    assert len(while_ev_norm) > 0, (
+        "FALSE-POSITIVE: vector-carry norm-cond while suppressed (predicate keyed on carry?)"
+    )
+    # Carry events should have batched shape (8,) — the full carry, not a scalar.
+    for ev in while_ev_norm:
+        assert ev.value[0].shape == (8,), (
+            f"norm-cond carry tap shape should be (8,), got {ev.value[0].shape}"
+        )
+
+    # Case B: vector carry, index-into-carry scalar cond.
+    def f_index(c):
+        def cond(carry):
+            return carry[0] < 5.0
+
+        def body(carry):
+            return carry + 1.0
+
+        return jax.lax.while_loop(cond, body, c)
+
+    init_idx = jnp.zeros(4, dtype=jnp.float32)
+    ref_idx = f_index(init_idx)
+    events_idx: list = []
+    got_idx = tap.verbose(f_index, on_step=events_idx.append)(init_idx)
+    jax.block_until_ready(got_idx)
+
+    assert np.asarray(ref_idx).tobytes() == np.asarray(got_idx).tobytes(), (
+        "vector-carry index-cond: output not bitwise identical"
+    )
+    while_ev_idx = [e for e in events_idx if "while" in e.path]
+    assert len(while_ev_idx) > 0, (
+        "FALSE-POSITIVE: vector-carry index-cond while suppressed"
+    )
+
+    # Verify ndim=0 for both conds (documents WHY these are not suppressed).
+    def _cond_ndim(f, *args):
+        closed = jax.make_jaxpr(f)(*args)
+        eqns = [e for e in closed.jaxpr.eqns if str(e.primitive) == "while"]
+        return eqns[0].params["cond_jaxpr"].jaxpr.outvars[0].aval.ndim
+
+    assert _cond_ndim(f_norm, init_norm) == 0, (
+        "norm-cond should have scalar output (ndim=0)"
+    )
+    assert _cond_ndim(f_index, init_idx) == 0, (
+        "index-cond should have scalar output (ndim=0)"
+    )
+
+
+def test_predicate_false_negative_impossible():
+    """FALSE-NEGATIVE hunt: a vmap-batched while with scalar cond routes to rewrite_while.
+
+    The detection predicate `ndim > 0` is NECESSARY AND SUFFICIENT to identify
+    cases where rewrite_while would crash:
+    - rewrite_while crashes when `active = eval_jaxpr(cond_jaxpr)` returns bool[n],
+      because `lax.select(bool[n], scalar_step, ...)` fails.
+    - If cond_jaxpr output is scalar (ndim=0), `active` is scalar → lax.select
+      succeeds → no crash.
+
+    Therefore: there is no escape path.  A while with ndim=0 cond is either:
+    (a) truly non-vmap-batched → rewrite_while always correct, or
+    (b) vmap-batched-with-scalar-cond (cond reads only non-batched carry elements)
+        → rewrite_while handles it correctly (scalar active, batched carry processed).
+
+    This test proves case (b): vmap with in_axes=None on a shared counter,
+    cond reads only that counter.  JAX does NOT batch the cond (cond_jaxpr output
+    stays scalar, ndim=0).  The predicate routes to rewrite_while, which handles
+    it correctly because `active` is scalar.  Output is bitwise identical and
+    carry taps fire with batched carry values.
+    """
+
+    def f(x, count):
+        """carry = (f32[4] batched across lanes, i32 scalar shared counter)."""
+
+        def cond(carry):
+            return carry[1] < 5  # reads scalar counter only
+
+        def body(carry):
+            return (carry[0] + 1.0, carry[1] + 1)
+
+        return jax.lax.while_loop(cond, body, (x, count))
+
+    vmapped_f = jax.vmap(f, in_axes=(0, None))
+    init_x = jnp.zeros(4, dtype=jnp.float32)
+    init_count = jnp.int32(0)
+
+    # Verify the jaxpr: cond reads only the scalar counter → ndim=0.
+    closed = jax.make_jaxpr(vmapped_f)(init_x, init_count)
+    while_eqn = next(e for e in closed.jaxpr.eqns if str(e.primitive) == "while")
+    cj = while_eqn.params["cond_jaxpr"]
+    cond_ndim = cj.jaxpr.outvars[0].aval.ndim
+    assert cond_ndim == 0, (
+        f"Expected cond_jaxpr ndim=0 (scalar cond reads non-batched counter), "
+        f"got ndim={cond_ndim}"
+    )
+
+    # Run through verbose(): predicate says False → rewrite_while path.
+    ref = vmapped_f(init_x, init_count)
+    events: list = []
+    got = tap.verbose(vmapped_f, on_step=events.append)(init_x, init_count)
+    jax.block_until_ready(got)
+
+    # Output is bitwise identical.
+    assert np.asarray(ref[0]).tobytes() == np.asarray(got[0]).tobytes(), (
+        "false-negative test: output not bitwise identical"
+    )
+
+    # rewrite_while fired: carry taps appear (5 iterations × scalar active → no crash).
+    while_events = [e for e in events if "while" in e.path]
+    assert len(while_events) == 5, (
+        f"Expected 5 while carry taps (5 iterations of scalar cond), "
+        f"got {len(while_events)}"
+    )
+    # Carry values are batched f32[4] (x) paired with scalar i32 counter.
+    # value[0] is the first leaf of the carry pytree, i.e. the float array.
+    for ev in while_events:
+        assert ev.value[0].shape == (4,), (
+            f"Carry tap should show batched float (shape (4,)), got {ev.value[0].shape}"
+        )
