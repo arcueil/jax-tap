@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+- **Fix: B-form `verbose(vmap(f))` crash on vmapped while_loop (GitHub #5)**.
+  `tap.verbose(jax.vmap(f))` (and equivalent A-form usage against a pre-vmapped
+  function) crashed with `TypeError: select 'which' must be scalar` when `f`
+  contains a `while_loop`.  Root cause: JAX's vmap batching rule stores the
+  unreduced per-lane predicate (`bool[n]`) in `cond_jaxpr`; `rewrite_while`
+  passed this to `lax.select` which requires a scalar `which`.
+
+  Fix: detect vmap-batched while_loops in the walker by checking
+  `cond_jaxpr.outvars[0].aval.ndim > 0` and bind them opaquely (re-emit through
+  the original primitive).  The `ndim > 0` predicate catches all batching depths
+  (`bool[n]` from single vmap, `bool[n,m]` from nested vmap, etc.).  A normal
+  `while_loop` cond must return scalar bool, so `ndim > 0` can only arise from
+  vmap batching.
+
+  Delivered semantics:
+
+  | context | while carry taps | notes |
+  |---|---|---|
+  | non-vmap while | yes — A1 ghost-drop intact | unchanged |
+  | `jax.vmap(tap.verbose(f))` | yes — A1 per-lane ghost-drop | unchanged; A-form scalar intercept was never broken |
+  | `tap.verbose(jax.vmap(f))` | **suppressed** (opaque bind) | crash fixed; bitwise-identical output |
+
+  Outer **scan** carry taps around the vmapped while fire correctly with batched
+  carry values — this is the high-value diagnostic for NUTS/HMC samplers
+  (treedepth etc. live in the scan carry, not the inner while).  Per-lane while
+  telemetry under B-form vmap is a future arc.
+
 ## 0.2.0 (2026-07-09)
 
 - **Carry-tap alerts**: `alert=` / `alert_once=` on `tap.verbose` and
