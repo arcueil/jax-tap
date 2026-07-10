@@ -239,6 +239,33 @@ def test_select_ys_none_select():
         assert len(e.value) == 2
 
 
+def test_select_ys_returns_pytree():
+    """select_ys can return a pytree; host TapEvent.value has the reconstructed structure.
+
+    select_ys receives flat leaves but may return any pytree — a dict, namedtuple,
+    etc. — which is captured at trace time and reconstructed on the host via the
+    treedef, same as the carry-tap select mechanism.
+    """
+    f, init = _dict_ys_scan(n_steps=3)
+
+    # ys is dict {"a": ..., "b": ...}; JAX pytree sorts dict keys alphabetically:
+    # flat leaves[0] = value of "a" = new_carry, leaves[1] = value of "b" = new_carry*2
+    y_events = []
+    tapped = tap.verbose(
+        f,
+        on_ys=lambda e: y_events.append(e),
+        select_ys=lambda ys_leaves: {"td": ys_leaves[0], "eps": ys_leaves[1]},
+    )
+    tapped(init)
+
+    assert len(y_events) == 3
+    for e in y_events:
+        assert isinstance(e.value, dict), f"Expected dict, got {type(e.value)}"
+        assert set(e.value.keys()) == {"td", "eps"}
+        # "eps" ← "b" leaf = new_carry * 2.0; "td" ← "a" leaf = new_carry
+        assert abs(float(e.value["eps"]) - float(e.value["td"]) * 2.0) < 1e-5
+
+
 # ---------------------------------------------------------------------------
 # 6. on_ys separate from on_step — routing contract
 # ---------------------------------------------------------------------------
@@ -705,6 +732,39 @@ def test_df_excludes_output_events():
     # df() only uses path, step, value — kind is invisible regardless of event type
     assert "kind" not in df.columns
     assert list(df.columns) == ["path", "step", "value"]
+
+
+def test_df_mixed_stream_no_crash():
+    """df() on a mixed carry+output stream does not crash; kind column absent.
+
+    Exercises the note in df()'s docstring: with mixed carry/output events,
+    df() is undifferentiated — filter rec.events by kind before calling df()
+    if separation is needed.
+    """
+    f, init = _simple_scan(n_steps=4)
+
+    # B-form record: rec.events accumulates BOTH carry and output events.
+    g, rec = tap.record(f, on_ys=lambda e: None, select_ys=lambda ys: ys[0])
+    g(init)
+
+    carry_events = [e for e in rec.events if e.kind == "carry"]
+    output_events = [e for e in rec.events if e.kind == "output"]
+    assert len(carry_events) == 4
+    assert len(output_events) == 4
+
+    # df() on the full mixed stream must not crash.
+    df = rec.df()
+    assert len(df) == 8  # 4 carry + 4 output rows, all with path/step/value
+    assert "kind" not in df.columns
+    assert set(df.columns) == {"path", "step", "value"}
+
+    # Caller can narrow by filtering events first.
+    import jaxtap
+
+    carry_rec = jaxtap.FlightRecorder()
+    carry_rec.events = carry_events
+    carry_df = carry_rec.df()
+    assert len(carry_df) == 4
 
 
 # ---------------------------------------------------------------------------
