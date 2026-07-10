@@ -1,7 +1,24 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-07-10)
 
+Consumer-driven fixes from the blackjax / tuningfork integration.
+
+- **Fix: `max_depth` over-routed on cross-context cache hits, and is now
+  correctly scoped to carry taps (GitHub #2).** When a function compiled under
+  one `tap.record()` context was called inside a second context with a stricter
+  `max_depth`, the dynamic router delivered all-depth carry events to the
+  receiving recorder (measured ~50× host-callback waste on a 15-step NUTS run).
+  The router now applies the receiving context's `max_depth` to foreign-trace
+  cache-hit events. Scoped to **carry** taps only (matching the documented
+  semantics): primitive taps (`tap.on`, `tap.watch_nan`) are **not** filtered
+  by `max_depth`, so NaN tripwires survive under `max_depth=0`.
+- **`jaxtap.original_scan` public export + cross-consumer docs (GitHub #4).**
+  A stable public reference to the pristine `jax.lax.scan` (captured at import)
+  for tools that assert scan restoration without importing privates. Plus a
+  Known-Boundaries example documenting that a compiled instrumented artifact
+  carries its trace-time `select`/callback — a second consumer reusing it
+  receives no events (instrument under your own context instead).
 - **Fix: B-form `verbose(vmap(f))` crash on vmapped while_loop (GitHub #5)**.
   `tap.verbose(jax.vmap(f))` (and equivalent A-form usage against a pre-vmapped
   function) crashed with `TypeError: select 'which' must be scalar` when `f`
