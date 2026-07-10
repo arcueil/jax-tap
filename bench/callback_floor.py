@@ -20,23 +20,34 @@ Renamed from bench_overhead.py (bench restructure).  Content and arms are unchan
 Four arms for a representative scan body (dim=8 float32 carry,
 body: c = c * 1.01 + sin(x)):
 
-  bare           — plain lax.scan, jitted, steady-state baseline
-  manual         — same scan + jax.debug.callback(noop, carry) per step
-  manual-payload — same as manual but ships step index + carry (mirrors verbose payload)
-  verbose        — tap.verbose(f, on_step=noop, sample_every=k) carry tap only
-  record-A       — with tap.record(on_step=noop, sample_every=k): f_jit() A-form context
-  primtap        — tap.verbose(..., taps=[tap.on("sin", ...)]) carry+prim tap combined
+  bare               — plain lax.scan, jitted, steady-state baseline
+  manual             — same scan + jax.debug.callback(noop, carry) per step
+  manual-payload     — same as manual but ships step index + carry (mirrors verbose payload)
+  manual-payload-ys  — ships step int32 + scalar ys float32 (mirrors ytap payload; N=N_COMPILE)
+  verbose            — tap.verbose(f, on_step=noop, sample_every=k) carry tap only
+  record-A           — with tap.record(on_step=noop, sample_every=k): f_jit() A-form context
+  primtap            — tap.verbose(..., taps=[tap.on("sin", ...)]) carry+prim tap combined
+  ytap               — tap.verbose(f, on_ys=noop, select_ys=lambda ys: ys[0], se=1) — new
+  ytap-empty         — tap.verbose(f, on_ys=noop, select_ys=lambda _: (), se=1) — new
 
 The manual-payload arm isolates jaxtap machinery cost from payload-transit cost.
 verbose fires jax.debug.callback(_host, step, *carry_leaves, ordered=False).
 manual-payload mirrors that exactly (step int32 + dim-8 carry float32), letting you
 decompose: verbose cost = payload-transit cost + ~18 µs jaxtap machinery.
 
+ytap / ytap-empty measure the cost of the 0.3.0 y-tap hot path: TapEvent.kind field
+construction on every output event and the _dynamic_router branch on kind=="output".
+manual-payload-ys is the matched floor: same callback pattern but no jaxtap machinery,
+shipping step int32 + scalar carry[0] float32 (the same payload select_ys delivers).
+ytap-empty ships an empty ys tuple (the progress idiom: zero payload, callback round-trip only).
+Both ytap arms run on a scan body that returns (carry, carry[0]) — a per-step scalar ys.
+
 Axes
 ----
   N           : 1_000, 10_000, 100_000 (scan length)
   sample_every: 1, 10, 100  (jaxtap arms; prim tap fires every step regardless of se)
   vmap_lanes  : 1, 8  (bare/manual/verbose; lanes=8 only at N=10_000 to cap wall time)
+  ytap arms   : N=N_COMPILE only, se=1 only
 
 Measurement
 -----------
@@ -85,6 +96,12 @@ def make_xs(N: int) -> jax.Array:
 
 def scan_body(carry: jax.Array, x: jax.Array):
     return carry * 1.01 + jnp.sin(x), None
+
+
+def scan_body_with_ys(carry: jax.Array, x: jax.Array):
+    """Scan body that emits a per-step scalar output (ys), for y-tap benchmarking."""
+    c = carry * 1.01 + jnp.sin(x)
+    return c, c[0]
 
 
 def noop_on_step(event: tap.TapEvent) -> None:
@@ -177,6 +194,74 @@ def arm_manual_payload(N: int) -> tuple:
     return jax.jit(f), init
 
 
+def arm_manual_payload_ys(N: int) -> tuple:
+    """
+    Manual y-tap floor: jax.debug.callback(step int32, scalar ys float32).
+
+    Mirrors the exact payload delivered by the ytap arm after select_ys — step int32
+    and carry[0] scalar float32 — without jaxtap machinery.  Use the delta
+    (ytap − manual-payload-ys) to measure the per-event cost of the y-tap hot path
+    (TapEvent.kind field construction + _dynamic_router kind=="output" branch).
+    lanes=1 only; N=N_COMPILE only.
+    """
+    xs = make_xs(N)
+    init = (jnp.zeros(DIM), jnp.int32(0))
+
+    def body(carry, x):
+        c, i = carry
+        c2 = c * 1.01 + jnp.sin(x)
+        jax.debug.callback(lambda i_, y_: None, i, c2[0], ordered=False)
+        return (c2, i + 1), c2[0]
+
+    def f(carry):
+        (c, _), _ = lax.scan(body, carry, xs)
+        return c
+
+    return jax.jit(f), init
+
+
+def arm_ytap(N: int, sample_every: int = 1):
+    """
+    Y-tap arm: tap.verbose with on_ys=noop and select_ys=lambda ys: ys[0].
+
+    Benchmarks the 0.3.0 y-tap hot path: TapEvent.kind="output" constructed per event,
+    _dynamic_router branches on kind, select_ys applied on-device before the host
+    boundary.  No carry tap (on_step=None).  Body returns (carry, carry[0]) so scan
+    emits a per-step scalar ys.  Compare against manual-payload-ys to isolate machinery.
+    """
+    xs = make_xs(N)
+    init = jnp.zeros(DIM)
+
+    def f(c):
+        return lax.scan(scan_body_with_ys, c, xs)[0]
+
+    ft = tap.verbose(
+        f, on_ys=noop_on_step, select_ys=lambda ys: ys[0], sample_every=sample_every
+    )
+    return jax.jit(ft), init
+
+
+def arm_ytap_empty(N: int, sample_every: int = 1):
+    """
+    Empty y-tap arm: tap.verbose with on_ys=noop and select_ys=lambda _: ().
+
+    The y-tap progress idiom — zero ys bytes shipped per event.  The callback fires
+    but the empty select_ys prevents any payload from crossing the host boundary.
+    Measures the minimum y-tap overhead: callback round-trip with empty payload.
+    Compare against manual-payload-ys to measure the cost of the machinery alone.
+    """
+    xs = make_xs(N)
+    init = jnp.zeros(DIM)
+
+    def f(c):
+        return lax.scan(scan_body_with_ys, c, xs)[0]
+
+    ft = tap.verbose(
+        f, on_ys=noop_on_step, select_ys=lambda _: (), sample_every=sample_every
+    )
+    return jax.jit(ft), init
+
+
 def arm_verbose(N: int, sample_every: int = 1, lanes: int = 1):
     xs = make_xs(N)
     init = jnp.zeros((lanes, DIM)) if lanes > 1 else jnp.zeros(DIM)
@@ -262,6 +347,59 @@ def compile_time_record_aform(N: int, sample_every: int = 1) -> float:
 # ---------------------------------------------------------------------------
 
 
+def print_ytap_table(ytap_rows: list[dict], N_COMPILE: int, smoke: bool) -> None:
+    """Print a dedicated y-tap machinery section below the main table."""
+    if not ytap_rows:
+        return
+
+    smoke_tag = " *(smoke run: N=100, K=3)*" if smoke else ""
+    mpys = next((r for r in ytap_rows if r["arm"] == "manual-payload-ys"), None)
+    ytap = next((r for r in ytap_rows if r["arm"] == "ytap"), None)
+    ytap_empty = next((r for r in ytap_rows if r["arm"] == "ytap-empty"), None)
+
+    print(f"## Y-tap overhead (N={N_COMPILE:,}, se=1, lanes=1){smoke_tag}")
+    print()
+    print(
+        "Machinery = arm − manual-payload-ys (host-callback floor for scalar ys payload)."
+    )
+    print(
+        "manual-payload-ys ships step int32 + carry[0] float32 — same payload as ytap(select_ys=lambda ys: ys[0])."
+    )
+    print()
+    print("| arm | median (µs/step) | min (µs/step) | machinery (µs) |")
+    print("|-----|-----------------|---------------|----------------|")
+    if mpys is not None:
+        print(f"| manual-payload-ys | {mpys['med']:>15.3f} | {mpys['mn']:>13.3f} | — |")
+    if ytap is not None and mpys is not None:
+        mach = ytap["med"] - mpys["med"]
+        print(
+            f"| ytap(se=1)        | {ytap['med']:>15.3f} | {ytap['mn']:>13.3f} | {mach:>+14.3f} |"
+        )
+    if ytap_empty is not None and mpys is not None:
+        mach = ytap_empty["med"] - mpys["med"]
+        print(
+            f"| ytap-empty(se=1)  | {ytap_empty['med']:>15.3f} | {ytap_empty['mn']:>13.3f} | {mach:>+14.3f} |"
+        )
+    print()
+    print("### Y-tap arm notes")
+    print()
+    print(
+        "- **manual-payload-ys**: `jax.debug.callback(step_i32, carry[0]_f32, ordered=False)` — ys floor"
+    )
+    print(
+        "- **ytap**: `tap.verbose(f, on_ys=noop, select_ys=lambda ys: ys[0], se=1)` — scalar ys tap; on_step=None"
+    )
+    print(
+        "- **ytap-empty**: `tap.verbose(f, on_ys=noop, select_ys=lambda _: (), se=1)` — empty ys (progress idiom)"
+    )
+    print(
+        "- Both ytap arms use a scan body returning `(carry, carry[0])` — one scalar ys per step."
+    )
+    print(
+        "- Machinery isolates the 0.3.0 y-tap hot path: `TapEvent.kind='output'` construction + `_dynamic_router` branch."
+    )
+
+
 def print_tables(rows: list[dict], compile_rows: list[tuple], smoke: bool) -> None:
     smoke_tag = " *(smoke run: N=100, K=3)*" if smoke else ""
 
@@ -341,6 +479,9 @@ def print_tables(rows: list[dict], compile_rows: list[tuple], smoke: bool) -> No
     print(
         "- **prim-tap-only**: not measurable; ops=() prevents walker descent into scan, silencing prim taps. primtap arm = carry+prim combined."
     )
+    print(
+        "- **ytap / ytap-empty**: y-tap arms; see the Y-tap overhead section below for machinery breakdown."
+    )
     if smoke:
         print()
         print(
@@ -388,6 +529,7 @@ def main() -> None:
 
     rows: list[dict] = []
     compile_rows: list[tuple] = []
+    ytap_rows: list[dict] = []
 
     # -----------------------------------------------------------------------
     # Compile times
@@ -436,6 +578,56 @@ def main() -> None:
                 dict(arm="manual-payload", N=N, se="-", lanes=1, med=mp_med, mn=mp_min)
             )
             print(f"  manual-payload:{mp_med:.3f} µs/step", file=sys.stderr, flush=True)
+
+            # y-tap arms (N=N_COMPILE only, se=1 only — new 0.3.0 y-tap hot path)
+            print("  --- y-tap arms (0.3.0) ---", file=sys.stderr, flush=True)
+
+            fn, init = arm_manual_payload_ys(N)
+            mpys_med, mpys_min = warmup_and_time(fn, init, N, K)
+            ytap_rows.append(
+                dict(
+                    arm="manual-payload-ys",
+                    N=N,
+                    se="-",
+                    lanes=1,
+                    med=mpys_med,
+                    mn=mpys_min,
+                )
+            )
+            print(
+                f"  manual-payload-ys: {mpys_med:.3f} µs/step",
+                file=sys.stderr,
+                flush=True,
+            )
+
+            fn, init = arm_ytap(N, sample_every=1)
+            ytap_med, ytap_min = warmup_and_time(fn, init, N, K)
+            ytap_rows.append(
+                dict(arm="ytap", N=N, se=1, lanes=1, med=ytap_med, mn=ytap_min)
+            )
+            print(
+                f"  ytap(se=1):        {ytap_med:.3f} µs/step",
+                file=sys.stderr,
+                flush=True,
+            )
+
+            fn, init = arm_ytap_empty(N, sample_every=1)
+            ytap_empty_med, ytap_empty_min = warmup_and_time(fn, init, N, K)
+            ytap_rows.append(
+                dict(
+                    arm="ytap-empty",
+                    N=N,
+                    se=1,
+                    lanes=1,
+                    med=ytap_empty_med,
+                    mn=ytap_empty_min,
+                )
+            )
+            print(
+                f"  ytap-empty(se=1):  {ytap_empty_med:.3f} µs/step",
+                file=sys.stderr,
+                flush=True,
+            )
 
         # verbose (lanes=1, varying se)
         for se in SE_VALUES:
@@ -497,6 +689,8 @@ def main() -> None:
                 )
 
     print_tables(rows, compile_rows, smoke=args.smoke)
+    print()
+    print_ytap_table(ytap_rows, N_COMPILE, smoke=args.smoke)
 
 
 if __name__ == "__main__":
