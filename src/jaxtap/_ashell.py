@@ -410,6 +410,23 @@ def _dynamic_router(event: Any) -> None:
         _guard_fn = _g
         _carry_alert_fn = _fca
 
+    # Host-side max_depth filter for cache-hit events from a foreign trace.
+    #
+    # On a jit-cache hit, the baked XLA artifact emits at the ORIGINAL context's
+    # max_depth (baked device-side by verbose's walker).  The receiving context
+    # may have a STRICTER max_depth — we must re-apply it here before firing
+    # anything (alert included, matching the A1 ghost-drop-before-alert principle).
+    #
+    # Depth measure: event.path.count("/") — exactly the measure the walker uses
+    # (_walker.py, `depth = here.count("/")`, filter `depth <= max_depth`).
+    # Keeping both measures identical ensures the host filter is consistent with
+    # the device-side emission filter for same-context calls.
+    #
+    # None-check short-circuits on the common path (no max_depth configured) at
+    # near-zero cost.
+    if ctx._max_depth is not None and event.path.count("/") > ctx._max_depth:
+        return
+
     # alert fires BEFORE on_step/recorder — matching verbose() ordering.
     # Using the ACTIVE context's alert and once-set means cache hits in a new
     # context correctly fire the new context's alert (not the prior trace's).
