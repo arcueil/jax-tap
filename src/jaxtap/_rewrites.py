@@ -63,6 +63,7 @@ def rewrite_scan(
     outer_step: Any = None,
     *,
     emit_carry: bool = True,
+    y_tap_cb: "TapCallback | None" = None,
 ) -> list:
     """
     Rebuild a scan equation with a per-step counter in the carry and a
@@ -86,6 +87,12 @@ def rewrite_scan(
         When False, skip the ``tap_cb(here, step, ...)`` carry-heartbeat call
         but still descend into the body via ``interp_fn`` so that primitive taps
         and nested-loop carry taps can fire.  Default: True.
+    y_tap_cb:
+        Optional callback receiving ``(path, step, *ys_leaves, total=total)``
+        for the per-step scan outputs (ys).  ``None`` means no y-tap (zero
+        device overhead).  The ``len(ys) > 0`` guard below is a Python
+        (trace-time) check — zero device-side overhead when body returns
+        ``(carry, None)`` (the progress-bar idiom).  Default: None.
     """
     p = eqn.params
     body: "jax_core.ClosedJaxpr" = p["jaxpr"]
@@ -132,6 +139,14 @@ def rewrite_scan(
             # tap_cb already has sample_every gating baked in (see verbose() in __init__.py).
             # total is a Python int captured from the enclosing rewrite_scan scope.
             tap_cb(here, step, *new_carry, total=total)
+        # y-tap fires after carry tap, same step value.
+        # AYS-1 fix: len(ys) > 0 guard prevents empty-event spam on None-output
+        # scans (body returns (carry, None)).  This is a Python trace-time check —
+        # zero device-side overhead.  The guard is CRITICAL: without it, a scan
+        # with (carry, None) body fires a stream of empty TapEvent(kind="output")
+        # every step — useless noise.
+        if y_tap_cb is not None and len(ys) > 0:
+            y_tap_cb(here, step, *ys, total=total)
         return (new_carry, step + 1), ys
 
     (carry_out, _), ys = jax.lax.scan(

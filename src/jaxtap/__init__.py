@@ -128,6 +128,12 @@ class TapEvent:
         this is the loop length ``N``. For ``while_loop``, outside any loop,
         or for primitive taps outside any loop, this is ``None``. Default:
         ``None``.
+    kind : str, optional
+        Event kind: ``"carry"`` for carry-tap events (default, backward-safe),
+        ``"output"`` for y-tap events (per-step scan output).  All pre-0.3.0
+        construction sites omit this field and receive the ``"carry"`` default.
+        ``df()`` does not include this field; consumers who need it build a
+        DataFrame directly from ``rec.events``.  Default: ``"carry"``.
     """
 
     path: str  # stable address, e.g. "scan[0]/while[0]"
@@ -136,6 +142,7 @@ class TapEvent:
     total: "int | None" = (
         None  # enclosing loop length when known (scan: N; while/outside: None)
     )
+    kind: str = "carry"  # "carry" | "output" — new in 0.3.0; default preserves compat
 
 
 @dataclasses.dataclass(frozen=True)
@@ -521,13 +528,17 @@ def verbose(
     *,
     on_step: "Callable[[TapEvent], None] | None" = None,
     select: Callable | None = None,
+    alert: "Callable[[TapEvent], Any] | None" = None,
+    alert_once: bool = False,
+    on_ys: "Callable[[TapEvent], None] | None" = None,
+    select_ys: "Callable | None" = None,
+    alert_ys: "Callable[[TapEvent], Any] | None" = None,
+    alert_ys_once: bool = False,
     ops: tuple[str, ...] = ("scan", "while_loop"),
     sample_every: int = 1,
     where: "Callable[[str], bool] | None" = None,
     max_depth: "int | None" = None,
     taps: "Sequence[PrimitiveTap]" = (),
-    alert: "Callable[[TapEvent], Any] | None" = None,
-    alert_once: bool = False,
     _start_cf_index: int = 0,
 ) -> Callable:
     """
@@ -605,6 +616,39 @@ def verbose(
         Optional depth limit.  CF nodes at depth > ``max_depth`` (depth =
         number of ``/`` segments in the path) do not emit carry taps.
         Deeper primitive taps and nested loops still fire.  Default: no limit.
+    on_ys:
+        Optional HOST-side callback called with a :class:`TapEvent`
+        (``kind="output"``) for each per-step scan output (``ys``).
+        Independent of ``on_step`` — carry events go to ``on_step``, output
+        events go to ``on_ys``.  Both may be set; both fire independently.
+        Runs inside the ``_guard`` discipline (never propagates).  Default:
+        ``None``.
+    select_ys:
+        Optional traced-side callable applied to the per-step scan outputs
+        **on-device** before the host boundary crossing.  Receives a **flat
+        tuple of ys leaves** (pytree structure is erased by JAX tracing).
+        Leaf order follows JAX pytree convention: namedtuple fields in
+        declaration order; dict keys sorted alphabetically.  Inspect with
+        ``jax.tree_util.tree_leaves(example_y)`` to find indices.
+
+        Example: if ys is a namedtuple with fields ``(is_div, treedepth)``,
+        ``select_ys=lambda ys_leaves: ys_leaves[1]`` selects ``treedepth``.
+
+        Default: ``None`` — all ys leaves are delivered as ``TapEvent.value``.
+    alert_ys:
+        Optional HOST-side callable evaluated on each y-tap :class:`TapEvent`
+        (``kind="output"``).  When truthy, emits one terse line to stderr::
+
+            [tap] FAIL {path} {step}/{total}: {msg}
+
+        where ``msg`` is the returned value when it is a ``str``, otherwise
+        ``"alert"``.  Include ``"output:"`` or a field name in the message to
+        distinguish y-tap alerts from carry-tap alerts in log grep.  Runs
+        inside the ``_guard`` discipline (never propagates).  Fires BEFORE
+        ``on_ys``.  Default: ``None``.
+    alert_ys_once:
+        When ``True``, the ``alert_ys`` fires at most once per path per
+        :func:`verbose` call.  Default: ``False``.
     taps:
         Sequence of :class:`PrimitiveTap` specs created via :func:`on`.  After
         the walker binds any non-boundary primitive whose name matches a spec,
@@ -704,6 +748,19 @@ def verbose(
     """
     if sample_every < 1:
         raise ValueError(f"sample_every must be >= 1, got {sample_every}")
+
+    # y-tap warning: select_ys has no effect when "scan" is not in ops.
+    # while_loop has no per-step ys accumulation — the guard in rewrite_scan
+    # (y_tap_cb is only passed to rewrite_scan, not rewrite_while) makes
+    # this a silent no-op anyway, but the warning helps with misconfiguration.
+    if select_ys is not None and "scan" not in ops:
+        warnings.warn(
+            'jaxtap: select_ys has no effect when ops does not include "scan" '
+            "(while_loop has no per-step ys accumulation). "
+            'Remove select_ys or add "scan" to ops.',
+            UserWarning,
+            stacklevel=2,
+        )
 
     # Per-verbose()-call set tracking which paths have already fired a carry alert
     # with alert_once=True.  Mutable so all _host closures for this verbose() call
@@ -892,6 +949,110 @@ def verbose(
         else:
             tap_cb = _base_tap_cb
 
+    # ---------------------------------------------------------------------------
+    # y-tap callback (y_tap_cb): taps on scan OUTPUTS (per-step ys).
+    # Mirrors tap_cb construction exactly, but:
+    #   - No _while_active: y-taps are scan-only (rewrite_while not touched).
+    #   - TapEvent.kind="output" to distinguish from carry events in rec.events.
+    #   - select_ys receives flat ys leaves (same jaxpr-boundary contract as select).
+    #   - alert_ys and on_ys fire in parallel to alert/on_step (independent).
+    #
+    # Per-verbose()-call set tracking which paths have already fired a ys alert
+    # with alert_ys_once=True.
+    # ---------------------------------------------------------------------------
+    _ys_once_fired: set[str] = set()
+
+    y_tap_cb: "Callable | None"
+
+    if on_ys is None and alert_ys is None:
+        # No y-tap observers at all.  Skip jax.debug.callback for ys entirely —
+        # zero device overhead even when select_ys is set (select_ys alone without
+        # on_ys/alert_ys has no consumer to deliver to).
+        y_tap_cb = None
+
+    else:
+        if select_ys is not None:
+            # select_ys runs on-device (inside the traced scan body), applying a
+            # user-supplied reducer to the flat ys leaves before the host crossing.
+            # sel_ys_tree is captured at Python (trace) time for host-side pytree
+            # reconstruction; it is re-captured on each scan body invocation
+            # (i.e. once per unique scan type at trace time).
+            def _base_y_tap_cb(
+                path: str,
+                step: Any,
+                *ys_leaves: Any,
+                total: "int | None" = None,
+            ) -> None:
+                selected_ys = select_ys(ys_leaves)
+                flat_selected_ys = jax.tree_util.tree_leaves(selected_ys)
+                sel_ys_tree = jax.tree_util.tree_structure(selected_ys)
+
+                def _host_ys(step_: Any, *flat_vals: Any) -> None:
+                    value = jax.tree_util.tree_unflatten(sel_ys_tree, list(flat_vals))
+                    event = TapEvent(
+                        path=path,
+                        step=step_.item(),
+                        value=value,
+                        total=total,
+                        kind="output",
+                    )
+                    # alert_ys fires BEFORE on_ys; both are independent.
+                    if alert_ys is not None:
+                        _fire_carry_alert(
+                            alert_ys, event, alert_ys_once, _ys_once_fired
+                        )
+                    if on_ys is not None:
+                        _guard(on_ys, event)
+
+                jax.debug.callback(_host_ys, step, *flat_selected_ys, ordered=False)
+
+        else:
+            # No select_ys: ship all ys leaves to the host unchanged.
+            def _base_y_tap_cb(
+                path: str,
+                step: Any,
+                *ys_leaves: Any,
+                total: "int | None" = None,
+            ) -> None:
+                def _host_ys(step_: Any, *leaves: Any) -> None:
+                    event = TapEvent(
+                        path=path,
+                        step=step_.item(),
+                        value=leaves,
+                        total=total,
+                        kind="output",
+                    )
+                    if alert_ys is not None:
+                        _fire_carry_alert(
+                            alert_ys, event, alert_ys_once, _ys_once_fired
+                        )
+                    if on_ys is not None:
+                        _guard(on_ys, event)
+
+                jax.debug.callback(_host_ys, step, *ys_leaves, ordered=False)
+
+        # Wrap with sample_every gate — same lax.cond device-side pattern as tap_cb.
+        # Both tap_cb and y_tap_cb gate on the same step % sample_every == 0 condition,
+        # so carry and output events from the same step are suppressed together.
+        if sample_every > 1:
+            _uncapped_y = _base_y_tap_cb
+
+            def y_tap_cb(
+                path: str,
+                step: Any,
+                *ys_leaves: Any,
+                total: "int | None" = None,
+            ) -> None:
+                jax.lax.cond(
+                    step % sample_every == 0,
+                    lambda _: _uncapped_y(path, step, *ys_leaves, total=total),
+                    lambda _: None,
+                    step,
+                )
+
+        else:
+            y_tap_cb = _base_y_tap_cb
+
     # Build the primitive-tap callback if any specs were provided.
     # This function is called from _interp after binding a matched primitive.
     # It fires jax.debug.callback → _guard-wrapped on_step with a TapEvent,
@@ -985,6 +1146,7 @@ def verbose(
             prim_taps=taps,
             prim_tap_fn=prim_tap_fn,
             _start_cf_index=_start_cf_index,
+            y_tap_cb=y_tap_cb,
         )
 
     return wrapped
@@ -994,6 +1156,10 @@ def record(
     f: "Callable | None" = None,
     *,
     select: "Callable | None" = None,
+    on_ys: "Callable[[TapEvent], None] | None" = None,
+    select_ys: "Callable | None" = None,
+    alert_ys: "Callable[[TapEvent], Any] | None" = None,
+    alert_ys_once: bool = False,
     ops: "tuple[str, ...]" = ("scan", "while_loop"),
     sample_every: int = 1,
     where: "Callable[[str], bool] | None" = None,
@@ -1108,6 +1274,10 @@ def record(
 
         return _RC(
             select=select,
+            on_ys=on_ys,
+            select_ys=select_ys,
+            alert_ys=alert_ys,
+            alert_ys_once=alert_ys_once,
             ops=ops,
             sample_every=sample_every,
             where=where,
@@ -1122,6 +1292,7 @@ def record(
 
     recorder = _FlightRecorder()
 
+    # Carry events: wired through on_step (same as pre-0.3.0).
     if on_step is not None:
         # Combine recorder + user callback into a single on_step for verbose().
         _user_cb = on_step
@@ -1134,10 +1305,33 @@ def record(
     else:
         effective_on_step = recorder
 
+    # Output events (y-taps): need to reach rec.events AND the user's on_ys.
+    # Only build effective_on_ys when any y-tap is configured — preserves
+    # zero-overhead guarantee when no y-tap params are set.
+    _has_ytap = on_ys is not None or select_ys is not None or alert_ys is not None
+    effective_on_ys: "Callable[[TapEvent], None] | None"
+    if _has_ytap:
+        if on_ys is not None:
+            # Combine recorder + user on_ys (parallel to carry's _combined above).
+            _user_on_ys = on_ys
+
+            def _combined_ys(event: TapEvent) -> None:
+                _guard(recorder, event)
+                _guard(_user_on_ys, event)
+
+            effective_on_ys = _combined_ys
+        else:
+            # select_ys or alert_ys only: output events reach rec.events via recorder.
+            effective_on_ys = recorder
+    else:
+        effective_on_ys = None
+
     tapped = verbose(
         f,
         on_step=effective_on_step,
+        on_ys=effective_on_ys,
         select=select,
+        select_ys=select_ys,
         ops=ops,
         sample_every=sample_every,
         where=where,
@@ -1145,6 +1339,8 @@ def record(
         taps=taps,
         alert=alert,
         alert_once=alert_once,
+        alert_ys=alert_ys,
+        alert_ys_once=alert_ys_once,
     )
     return tapped, recorder
 

@@ -444,14 +444,30 @@ def _dynamic_router(event: Any) -> None:
         if last_seg.startswith(("scan[", "while[")):
             return
 
-    # alert fires BEFORE on_step/recorder — matching verbose() ordering.
-    # Using the ACTIVE context's alert and once-set means cache hits in a new
-    # context correctly fire the new context's alert (not the prior trace's).
-    if ctx._alert is not None:
-        _carry_alert_fn(ctx._alert, event, ctx._alert_once, ctx._carry_once_fired)
-    _guard_fn(ctx._recorder, event)
-    if ctx._extra_on_step is not None:
-        _guard_fn(ctx._extra_on_step, event)
+    # Route based on event kind.  Output events (y-taps, kind="output") go to
+    # alert_ys → recorder → on_ys.  Carry and primitive events use the existing
+    # alert → recorder → on_step path.  The default kind="carry" means all pre-
+    # 0.3.0 events (including primitive taps which also default to kind="carry")
+    # take the existing branch — no behaviour change for pre-y-tap callers.
+    if getattr(event, "kind", "carry") == "output":
+        # y-tap output event: alert_ys fires BEFORE on_ys, matching verbose() order.
+        if ctx._alert_ys is not None:
+            _carry_alert_fn(
+                ctx._alert_ys, event, ctx._alert_ys_once, ctx._ys_once_fired
+            )
+        _guard_fn(ctx._recorder, event)
+        if ctx._extra_on_ys is not None:
+            _guard_fn(ctx._extra_on_ys, event)
+    else:
+        # Carry / primitive event: existing behaviour unchanged.
+        # alert fires BEFORE on_step/recorder — matching verbose() ordering.
+        # Using the ACTIVE context's alert and once-set means cache hits in a new
+        # context correctly fire the new context's alert (not the prior trace's).
+        if ctx._alert is not None:
+            _carry_alert_fn(ctx._alert, event, ctx._alert_once, ctx._carry_once_fired)
+        _guard_fn(ctx._recorder, event)
+        if ctx._extra_on_step is not None:
+            _guard_fn(ctx._extra_on_step, event)
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +627,10 @@ class _RecordContext:
         self,
         *,
         select: "Callable | None" = None,
+        on_ys: "Callable | None" = None,
+        select_ys: "Callable | None" = None,
+        alert_ys: "Callable | None" = None,
+        alert_ys_once: bool = False,
         ops: "tuple[str, ...]" = ("scan", "while_loop"),
         sample_every: int = 1,
         where: "Callable[[str], bool] | None" = None,
@@ -621,6 +641,10 @@ class _RecordContext:
         alert_once: bool = False,
     ) -> None:
         self._select = select
+        self._select_ys = select_ys
+        self._extra_on_ys = on_ys  # live y-tap output callback
+        self._alert_ys = alert_ys
+        self._alert_ys_once = alert_ys_once
         self._ops = ops
         self._sample_every = sample_every
         self._where = where
@@ -629,10 +653,12 @@ class _RecordContext:
         self._extra_on_step = on_step  # optional live-stream callback
         self._alert = alert
         self._alert_once = alert_once
-        # Per-context once-budget for carry alerts.  Initialized empty in __init__
-        # and reset fresh on each __enter__ so cache-hit calls in a new context
-        # get a new set rather than inheriting the prior context's spent budget.
+        # Per-context once-budgets for carry and ys alerts.  Initialized empty
+        # in __init__ and reset fresh on each __enter__ so cache-hit calls in
+        # a new context get a new set rather than inheriting the prior context's
+        # spent budget.
         self._carry_once_fired: set[str] = set()
+        self._ys_once_fired: set[str] = set()
         self._recorder: "FlightRecorder | None" = None
         self._key: str | None = None
         self._owner_thread: int | None = None
@@ -671,6 +697,7 @@ class _RecordContext:
 
         self._recorder = _FR()
         self._carry_once_fired = set()  # fresh once-budget for each context entry
+        self._ys_once_fired = set()  # fresh ys once-budget for each context entry
         self._key = str(uuid.uuid4())
         self._owner_thread = threading.get_ident()
         self._next_toplevel_idx = 0
@@ -821,16 +848,29 @@ class _RecordContext:
         # alert is NOT passed here: it is applied LIVE in _dynamic_router so that
         # JIT-cache hits in a new context fire the NEW context's alert (not the
         # baked closure's stale alert from the first trace).
+        #
+        # y-taps: when any y-tap param is configured, pass on_ys=_dynamic_router
+        # so output events route through the same dynamic singleton as carry events.
+        # select_ys IS baked (device-side leaf selection); alert_ys is NOT baked —
+        # applied LIVE in _dynamic_router like alert for carry.
+        _has_ytap = (
+            self._select_ys is not None
+            or self._extra_on_ys is not None
+            or self._alert_ys is not None
+        )
         return _verbose(
             g,
             on_step=_dynamic_router,
+            on_ys=_dynamic_router if _has_ytap else None,
             select=self._select,
+            select_ys=self._select_ys,
             ops=self._ops,
             sample_every=self._sample_every,
             where=self._where,
             max_depth=self._max_depth,
             taps=list(self._taps),
             _start_cf_index=_start_idx,
+            # alert_ys NOT baked — applied LIVE in _dynamic_router
         )(init, xs)
 
     def _intercept_while(

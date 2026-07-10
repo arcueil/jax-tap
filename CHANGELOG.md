@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased — 0.3.0
+
+### New: y-taps — taps on scan OUTPUTS (per-step `ys`) (GitHub #3)
+
+Zero-code-change telemetry for the per-step `ys` returned by `lax.scan`.
+Enables NUTS treedepth-saturation tripwires and other per-step diagnostics
+without modifying the sampler.
+
+**New parameters on `tap.verbose()` and `tap.record()`:**
+
+- `select_ys` — on-device selector applied to ys flat leaves before the host
+  boundary crossing.  Receives a **flat tuple of ys leaves** (same jaxpr-
+  boundary contract as `select` for carry).
+- `on_ys` — separate live host callback for output events (`kind="output"`),
+  parallel to `on_step` for carry events.  Carry events go to `on_step`;
+  output events go to `on_ys`.  Both may be set; both fire independently.
+- `alert_ys` — host-side alert predicate on output events.  When truthy,
+  emits `[tap] FAIL {path} {step}/{total}: {msg}` to stderr.  Messages
+  should be self-identifying (include "output:" or a field name) to
+  distinguish from carry-tap alerts in log grep.
+- `alert_ys_once` — fire `alert_ys` at most once per path per call.
+
+**`TapEvent.kind` field (new, backward-safe):**
+- Default `"carry"` — all pre-0.3.0 code that constructs or inspects
+  `TapEvent` without `kind=` continues to work unchanged.
+- Y-tap events carry `kind="output"`.
+- `df()` is unchanged (does not include `kind` or `total` columns).
+- Both carry and output events land in the single `rec.events` stream;
+  filter with `[e for e in rec.events if e.kind == "output"]`.
+
+**Scope:** scan-only.  `while_loop` has no per-step ys; `rewrite_while` is
+not touched.  Setting `select_ys` on a function with only while_loops
+produces zero output events (silent no-op).  A `UserWarning` is emitted at
+`verbose()`/`record()` call time when `select_ys` is set but `"scan"` is
+not in `ops`.
+
+**None-ys guard:** scans where the body returns `(carry, None)` (the
+progress-bar idiom) produce zero output events — the `len(ys) > 0` guard in
+`rewrite_scan.body_fn` is a Python trace-time check with zero device overhead.
+
+**JSONL note:** `JSONLWriter` does not serialize `kind`; round-tripped events
+default to `kind="carry"`.  Consumers who need `kind` in a JSONL stream
+should add it to their serialization layer.
+
+**Canonical treedepth tripwire:**
+
+```python
+with tap.record(
+    select_ys=lambda ys_leaves: ys_leaves[treedepth_field_idx],
+    on_ys=lambda e: print(f"step {e.step}: treedepth={float(e.value):.0f}"),
+    alert_ys=lambda e: (
+        f"output: treedepth saturated at step {e.step}"
+        if float(e.value) >= 10.0 else False
+    ),
+    alert_ys_once=True,
+) as rec:
+    result = sampler.run(key, x0, n_steps)
+
+output_events = [e for e in rec.events if e.kind == "output"]
+```
+
 ## 0.2.1 (2026-07-10)
 
 Consumer-driven fixes from the blackjax / tuningfork integration.

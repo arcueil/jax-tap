@@ -225,6 +225,7 @@ def interpret(
     prim_taps: Sequence[Any] = (),
     prim_tap_fn: "Callable | None" = None,
     _start_cf_index: int = 0,
+    y_tap_cb: "TapCallback | None" = None,
 ) -> Any:
     """
     Trace ``f(*args)`` once with ``make_jaxpr(return_shape=True)`` and run
@@ -291,6 +292,7 @@ def interpret(
             prim_tap_fn=prim_tap_fn,
             _start_cf_index=_start_cf_index,
             total=None,
+            y_tap_cb=y_tap_cb,
         )
     return jax.tree_util.tree_unflatten(out_tree, out_flat)
 
@@ -321,6 +323,7 @@ def _interp(
     _start_cf_index: int = 0,
     total: "int | None" = None,
     _in_loop: bool = False,
+    y_tap_cb: "TapCallback | None" = None,
 ) -> list:
     """Evaluate ``jaxpr`` against ``args``, rewriting CF primitives in ``ops``.
 
@@ -404,6 +407,7 @@ def _interp(
             prim_tap_fn=prim_tap_fn,
             total=total_,
             _in_loop=effective_in_loop,
+            y_tap_cb=y_tap_cb,
         )
 
     for eqn in jaxpr.eqns:
@@ -436,6 +440,7 @@ def _interp(
                     _recurse,
                     step,
                     emit_carry=emit_carry,
+                    y_tap_cb=y_tap_cb,
                 )
 
             elif prim_name == "while":
