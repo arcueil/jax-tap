@@ -23,6 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0  # hatch-vcs needs full history to derive version from the release tag
       - uses: astral-sh/setup-uv@v5
       - name: Build sdist and wheel from the release tag
         run: uv build

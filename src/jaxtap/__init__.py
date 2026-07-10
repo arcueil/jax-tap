@@ -57,6 +57,11 @@ Ergonomic collector helper::
 from __future__ import annotations
 
 import dataclasses
+
+try:
+    from ._version import __version__
+except ImportError:  # package not installed (editable install without build step)
+    __version__ = "unknown"
 import inspect
 import sys
 import warnings
@@ -74,6 +79,7 @@ if TYPE_CHECKING:
     from .collectors import FlightRecorder
 
 __all__ = [
+    "__version__",
     "TapEvent",
     "PrimitiveTap",
     "on",

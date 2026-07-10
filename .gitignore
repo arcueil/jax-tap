@@ -36,3 +36,6 @@ Thumbs.db
 
 # bench scratch logs
 bench/*.log
+
+# hatch-vcs: generated at build time, must not be committed
+src/jaxtap/_version.py

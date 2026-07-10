@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "jax-tap"
-version = "0.2.1"
+dynamic = ["version"]
 description = "Zero-code-change runtime telemetry for JAX control flow"
 authors = [{ name = "arcueil", email = "junpenglao@gmail.com" }]
 license = "Apache-2.0"
@@ -15,6 +15,12 @@ dependencies = ["jax>=0.10"]
 [project.urls]
 Homepage = "https://github.com/arcueil/jax-tap"
 Repository = "https://github.com/arcueil/jax-tap"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/jaxtap/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jaxtap"]
@@ -28,7 +34,7 @@ dev = ["pytest", "ruff", "mypy", "pre-commit", "pandas"]
 [tool.ruff]
 line-length = 88
 target-version = "py311"
-exclude = ["proofs/"]
+exclude = ["proofs/", "src/jaxtap/_version.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
@@ -39,6 +45,7 @@ python_version = "3.13"
 files = ["src"]
 ignore_missing_imports = true
 warn_unused_ignores = true
+exclude = ["src/jaxtap/_version\\.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

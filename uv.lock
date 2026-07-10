@@ -134,7 +134,6 @@ wheels = [
 
 [[package]]
 name = "jax-tap"
-version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "jax" },
