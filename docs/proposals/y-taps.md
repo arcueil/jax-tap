@@ -326,11 +326,14 @@ Rationale:
 - `rec.events` filtering by `kind` is O(n) at read time; no overhead at event
   delivery time. `df()` does not change (see AYS-1 compat note in section above).
 
-**Ordering guarantee:** within a given step, the carry event fires first, then
-the y event (because `new_carry` is tapped before `ys` in `body_fn`). This is
-guaranteed by the Python execution order within `body_fn`. It is NOT guaranteed
-across steps under asynchronous dispatch (`ordered=False`), which is the
-existing carry-tap contract.
+**Ordering — NO cross-callback guarantee.** `new_carry` is emitted before `ys`
+in `body_fn`, but both cross the host boundary via separate
+`jax.debug.callback(ordered=False)` calls, which are NOT serialized against each
+other. So the carry and output events for the *same step* may arrive in either
+order — CPU happens to preserve emission order (carry then output), GPU may not.
+(Corrected 2026-07-10: an earlier draft claimed carry-fires-first as a guarantee;
+the published-wheel GPU validation disproved it. Do not rely on carry/output
+relative order within a step, nor on cross-step order under `ordered=False`.)
 
 ---
 

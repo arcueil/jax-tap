@@ -317,8 +317,16 @@ def test_both_callbacks_fire():
     assert len(all_output) == 3
 
 
-def test_carry_fires_before_ys():
-    """Within the same step, carry event fires before output event."""
+def test_carry_and_ys_both_fire_per_step():
+    """Carry and output events both fire exactly once per step.
+
+    Their RELATIVE arrival order within a step is NOT guaranteed: both cross the
+    host boundary via ``jax.debug.callback(ordered=False)``, so the two callbacks
+    are not serialized against each other. CPU happens to preserve emission order
+    (carry then output); GPU may deliver them in either order. This test asserts
+    presence, not order (an earlier version asserted carry-before-output and
+    failed on GPU — caught by the published-wheel GPU validation).
+    """
     f, init = _simple_scan(n_steps=3)
 
     order = []
@@ -330,15 +338,12 @@ def test_carry_fires_before_ys():
     )
     tapped(init)
 
-    # For each step, carry should appear before output
+    # Both kinds fire exactly once per step (order within a step unspecified).
     for step in range(3):
-        carry_idx = next(
-            i for i, (k, s) in enumerate(order) if k == "carry" and s == step
-        )
-        output_idx = next(
-            i for i, (k, s) in enumerate(order) if k == "output" and s == step
-        )
-        assert carry_idx < output_idx, f"Step {step}: carry should fire before output"
+        kinds = sorted(k for k, s in order if s == step)
+        assert kinds == ["carry", "output"], f"Step {step}: got {kinds}"
+    assert sum(1 for k, _ in order if k == "carry") == 3
+    assert sum(1 for k, _ in order if k == "output") == 3
 
 
 # ---------------------------------------------------------------------------
