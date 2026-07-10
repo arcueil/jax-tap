@@ -248,19 +248,39 @@ blackjax-specific mechanics.
 
 ---
 
+## fix/vmap-while-crash arc (GitHub issue #5)
+
+New regression tests added to `test_bcore_conformance.py` for the B-form vmap×while crash:
+
+| test | what it covers |
+|---|---|
+| `test_bform_vmap_while_no_crash_and_bitwise` | Bug 2 repro: `verbose(vmap(while))` — no crash; 0 while taps; bitwise-identical output |
+| `test_bform_vmap_scan_while_no_crash_and_scan_taps` | Bug 1 / consumer repro: `verbose(vmap(scan(while)))` — no crash; scan taps fire with batched carry; 0 while taps; bitwise-identical |
+| `test_bform_nested_vmap_while_no_crash` | predicate robustness: `verbose(vmap(vmap(while)))` — ndim=2 cond detected; no crash; bitwise-identical |
+
+Disposition: all three are `ported` (new crash-fix regression coverage, no prior proof scripts).
+
+Semantics note: B-form `verbose(vmap(f))` where `f` contains a `while_loop` now binds the
+while opaquely (suppresses while carry taps).  `jax.vmap(tap.verbose(f))` continues to
+deliver per-lane carry taps with A1 ghost-drop (unchanged).  See CHANGELOG for the full
+semantics table.
+
+---
+
 ## Disposition tallies
 
 | disposition | count |
 |---|---|
 | covered | 60 |
-| ported | 35 |
+| ported | 38 |
 | documented-boundary | 26 |
 | N/A | 57 |
-| **total** | **178** |
+| **total** | **181** |
 
 *(Counts are per-check for multi-check scripts; per-file for single-scenario scripts.
-Ported entries reference tests in `test_bcore_conformance.py` (25 tests, +5 from A1 arc) and
-`test_ashell_conformance.py` (14 tests); both verified 191/191 full-suite green.
+Ported entries reference tests in `test_bcore_conformance.py` (28 tests = 25 original + 6
+from A1 arc + 3 from fix/vmap-while-crash) and `test_ashell_conformance.py` (14 tests);
+full suite 195/195 green after fix/vmap-while-crash.
 Two proof script failures are documented-boundary, not regressions: `ays_m1a_r2.py`
 "prim taps ungated" predates M1d FIX1; `ays_m1d.py` "vmap se-gate per-lane count"
 is inherent scalar-tap duality confirmed by `ays_m1d_r2.py`.

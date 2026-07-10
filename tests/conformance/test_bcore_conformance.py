@@ -835,3 +835,155 @@ def test_vmap_while_prim_tap_residual_ghost():
         f"prim taps expected to ghost-fire (>16 events) but got {len(prim_events)}; "
         "this test documents the known A1 residual boundary for prim taps"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fix/vmap-while-crash: regression tests for GitHub issue #5
+#
+# Both bugs triggered in the B-form: verbose(vmap(f)) where f contains a
+# while_loop.  make_jaxpr(vmap(f)) produces a while primitive with cond_jaxpr
+# returning bool[n] (JAX's vmap batching rule stores the unreduced predicate).
+# rewrite_while crashed because it passed this batched bool to lax.select
+# (which requires scalar 'which').
+#
+# Fix: detect the batched cond (cond_jaxpr.outvars[0].aval.ndim > 0) and bind
+# the while opaquely, preserving bitwise-identical outputs without crashing.
+#
+# Consumer note: outer SCAN carry taps fire normally with batched carry — this
+# is what tuningfork needs for NUTS diagnostics (treedepth lives in the scan,
+# not the inner while).  The inner while taps are suppressed (opaque bind);
+# per-lane while telemetry is a future arc.
+# ---------------------------------------------------------------------------
+
+
+def test_bform_vmap_while_no_crash_and_bitwise():
+    """B-form verbose(vmap(while)) must not crash and output must be bitwise identical.
+
+    Regression for GitHub issue #5 Bug 2: tap.record() / verbose() on a
+    vmapped while_loop crashed with 'TypeError: select which must be scalar'.
+
+    After fix: no crash; 0 while carry taps (opaque bind); output identical.
+    This is the MINIMAL repro from the issue report.
+    """
+
+    def f(s):
+        def cond(c):
+            return c < 5
+
+        def body(c):
+            return c + 1
+
+        return jax.lax.while_loop(cond, body, s)
+
+    vmapped_f = jax.vmap(f)
+    init = jnp.zeros(4, dtype=jnp.int32)
+
+    ref = vmapped_f(init)
+    events: list = []
+    got = tap.verbose(vmapped_f, on_step=events.append)(init)
+    jax.block_until_ready(got)
+
+    np.testing.assert_array_equal(
+        got, ref, err_msg="B-form vmap×while output not bitwise identical"
+    )
+    while_events = [e for e in events if "while" in e.path]
+    assert len(while_events) == 0, (
+        f"B-form vmap×while: expected 0 while carry taps (opaque bind), got {len(while_events)}"
+    )
+
+
+def test_bform_vmap_scan_while_no_crash_and_scan_taps():
+    """B-form verbose(vmap(scan(while))) must not crash; scan taps must fire.
+
+    Regression for GitHub issue #5 Bug 1: verbose(vmap_f) where vmap_f contains
+    scan(while) crashed with the same 'select which' error when _interp descended
+    into the batched scan body and encountered the batched while.
+
+    After fix: no crash; scan carry taps fire with batched carry values; inner
+    while taps are suppressed (opaque bind); output bitwise identical.
+
+    This is the NUTS-shaped consumer test: NUTS/HMC uses vmap(scan(while)) —
+    the leapfrog integrator is a while_loop nested in a trajectory scan.  Scan-
+    level taps deliver the high-value diagnostics (treedepth in the carry).
+    """
+    scan_length = 3
+
+    def outer(s):
+        def body(state, _):
+            def inner_body(c):
+                return c + 1
+
+            def inner_cond(c):
+                return c < 4
+
+            return jax.lax.while_loop(inner_cond, inner_body, state), None
+
+        return jax.lax.scan(body, s, None, length=scan_length)
+
+    vmapped_outer = jax.vmap(outer)
+    init = jnp.zeros(4, dtype=jnp.int32)
+
+    ref = vmapped_outer(init)
+    events: list = []
+    got = tap.verbose(vmapped_outer, on_step=events.append)(init)
+    jax.block_until_ready(got)
+
+    np.testing.assert_array_equal(
+        got[0], ref[0], err_msg="B-form vmap×scan(while) output not bitwise identical"
+    )
+    scan_events = [e for e in events if "scan" in e.path]
+    while_events = [e for e in events if "while" in e.path]
+
+    # Outer scan emits one carry tap per step, batched carry values.
+    assert len(scan_events) == scan_length, (
+        f"Expected {scan_length} scan carry taps (one per step), got {len(scan_events)}"
+    )
+    # Batched carry: each event's value should be an array of shape (4,).
+    for ev in scan_events:
+        carry_val = ev.value[0]
+        assert hasattr(carry_val, "shape") and carry_val.shape == (4,), (
+            f"Scan carry tap value should be batched shape (4,), got {carry_val!r}"
+        )
+    # Inner while is opaque-bound: no while carry taps.
+    assert len(while_events) == 0, (
+        f"B-form vmap×scan(while): expected 0 while taps (opaque bind), got {len(while_events)}"
+    )
+
+
+def test_bform_nested_vmap_while_no_crash():
+    """B-form verbose(vmap(vmap(while))) detects ndim=2 batched cond and binds opaquely.
+
+    The cond detection predicate checks ndim > 0, not ndim == 1, so nested
+    vmap (producing bool[n, m] cond output) is also handled correctly.
+    """
+
+    def f(s):
+        def cond(c):
+            return c < 3
+
+        def body(c):
+            return c + 1
+
+        return jax.lax.while_loop(cond, body, s)
+
+    nested_vmap_f = jax.vmap(jax.vmap(f))
+    init = jnp.zeros((3, 4), dtype=jnp.int32)
+
+    ref = nested_vmap_f(init)
+    events: list = []
+    got = tap.verbose(nested_vmap_f, on_step=events.append)(init)
+    jax.block_until_ready(got)
+
+    np.testing.assert_array_equal(
+        got, ref, err_msg="B-form vmap(vmap(while)) output not bitwise identical"
+    )
+    # Verify the jaxpr's cond has ndim=2 (confirms nested-vmap detection)
+    closed = jax.make_jaxpr(nested_vmap_f)(init)
+    cond_aval = closed.jaxpr.eqns[0].params["cond_jaxpr"].jaxpr.outvars[0].aval
+    assert cond_aval.ndim == 2, (
+        f"Expected nested-vmap cond to have ndim=2, got ndim={cond_aval.ndim}"
+    )
+    while_events = [e for e in events if "while" in e.path]
+    assert len(while_events) == 0, (
+        f"B-form nested-vmap×while: expected 0 while taps, got {len(while_events)}"
+    )

@@ -447,16 +447,37 @@ def _interp(
                     and (where is None or where(here))
                     and (max_depth is None or depth <= max_depth)
                 )
-                outvals = rewrite_while(
-                    eqn,
-                    invals,
-                    tap_cb,
-                    ops,
-                    here,
-                    _recurse,
-                    step,
-                    emit_carry=emit_carry,
+                # vmap-batched while detection: lax.while_loop requires cond to
+                # return a scalar bool.  A non-scalar output (ndim > 0) can ONLY
+                # arise from JAX's vmap batching rule, which stores the unreduced
+                # per-lane predicate (bool[n] or bool[n,m] for nested vmap) in
+                # cond_jaxpr and adds jnp.any reduction + carry masking at XLA-
+                # lowering time.  Neither the reduction nor the masking appears in
+                # the jaxpr params, so rewrite_while cannot reconstruct the correct
+                # scalar-cond/masked-body structure.  Bind opaquely to preserve the
+                # re-emit-through-original-primitive invariant and bitwise-identical
+                # outputs.  Carry taps on this while are suppressed; scan-level taps
+                # around it fire normally (see docs/CHANGELOG for consumer guidance).
+                _cj = eqn.params["cond_jaxpr"]
+                _cond_is_batched = (
+                    bool(_cj.jaxpr.outvars) and _cj.jaxpr.outvars[0].aval.ndim > 0
                 )
+                if _cond_is_batched:
+                    bind_params = eqn.primitive.get_bind_params(eqn.params)
+                    outvals = eqn.primitive.bind(*invals, **bind_params)
+                    if not eqn.primitive.multiple_results:
+                        outvals = [outvals]
+                else:
+                    outvals = rewrite_while(
+                        eqn,
+                        invals,
+                        tap_cb,
+                        ops,
+                        here,
+                        _recurse,
+                        step,
+                        emit_carry=emit_carry,
+                    )
 
             elif prim_name == "cond":
                 # F1 fix: recurse into all branches (cond and switch both use the
