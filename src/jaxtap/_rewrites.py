@@ -96,15 +96,30 @@ def rewrite_scan(
     """
     p = eqn.params
     body: "jax_core.ClosedJaxpr" = p["jaxpr"]
-    nc: int = p["num_consts"]
-    ncar: int = p["num_carry"]
+    # jax <= 0.10.x exposes num_consts / num_carry directly.  jax >= 0.11
+    # (head, 0.11.0.dev20260711+) removed them in favour of a packed
+    # ``ft_in`` ("flat types") param whose ``.unpack()`` yields the
+    # (consts, carry, xs) groups — upstream's own idiom is
+    # ``num_consts, num_carry, num_xs = map(len, ft_in.unpack())``
+    # (jax._src.lax.control_flow.loops).  We mirror it exactly.
+    # (Canary-watched seam — caught by the nightly vs JAX head, issue #9.)
+    if "num_consts" in p:
+        nc: int = p["num_consts"]
+        ncar: int = p["num_carry"]
+    else:
+        _consts_g, _carry_g, _ = p["ft_in"].unpack()
+        nc = len(_consts_g)
+        ncar = len(_carry_g)
 
     consts = invals[:nc]
     init = invals[nc : nc + ncar]
     xs = invals[nc + ncar :]  # flat list; passed as pytree to scan
 
-    # Forward all params except the ones we must reshape around.
-    rest = {k: v for k, v in p.items() if k not in ("jaxpr", "num_consts", "num_carry")}
+    # Forward only params the public ``jax.lax.scan`` API accepts (WHITELIST).
+    # A blacklist breaks whenever upstream ADDS an internal param — exactly
+    # what happened when jax 0.11 introduced ft_in/ft_out (issue #9).
+    _SCAN_FORWARD = ("length", "reverse", "unroll", "_split_transpose")
+    rest = {k: p[k] for k in _SCAN_FORWARD if k in p}
 
     # total: the scan length, known at trace time.  Passed to tap_cb and
     # down into interp_fn so that primitive taps inside the body see the
