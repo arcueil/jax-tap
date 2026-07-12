@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.1 (2026-07-12)
+
+- **JAX-head compat: scan params (GitHub #9).** JAX ≥ 0.11 (head,
+  `0.11.0.dev20260711+`) removed scan's `num_consts` / `num_carry` eqn params
+  in favour of a packed `ft_in` / `ft_out` structure — jaxtap's scan rewrite
+  crashed with `KeyError: 'num_consts'` on JAX nightlies. Caught by the
+  nightly canary (its first true upstream positive) months before a JAX 0.11
+  release. The walker now derives the split version-tolerantly
+  (`num_consts`/`num_carry` when present, else upstream's own
+  `map(len, ft_in.unpack())` idiom), and internal-param forwarding into
+  `jax.lax.scan` switched from blacklist to whitelist so future upstream param
+  additions can't leak into the public API. Verified 248/248 on jax 0.10.2
+  AND on 0.11.0.dev. No behavior change on any released JAX.
+- **Test fix:** the carry-vs-output arrival-order assertion under
+  `ordered=False` was over-specified (CPU preserves emission order, GPU may
+  reorder) — relaxed to presence; no library change (the ordering was never
+  guaranteed).
+- **Docs:** Known-Boundaries entry for `vmap`×`while_loop` transparency
+  (GitHub #7): a vmapped while whose cond depends only on a non-vmapped value
+  (step counter) is walked transparently; a per-chain cond (NUTS termination)
+  is opaque-bound (bitwise-identity guard) — with the carry-propagation
+  fallback documented. README: Install section; y-taps in the capability
+  table.
+- **Release tooling:** `RELEASE.md` + `tools/gpu_rc_validate.sh` — a mandatory
+  pre-tag GPU validation of the release candidate (GitHub CI is CPU-only and
+  cannot see GPU-specific behavior).
+
 ## 0.3.0 (2026-07-10)
 
 ### New: y-taps — taps on scan OUTPUTS (per-step `ys`) (GitHub #3)
