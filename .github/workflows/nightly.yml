@@ -23,6 +23,12 @@ jobs:
       - name: Install project + dev deps
         run: uv sync --dev
 
+      - name: Record pinned jax version (pre-upgrade)
+        run: |
+          PINNED=$(uv run --no-sync python -c "import jax; print(jax.__version__)")
+          echo "PINNED_JAX=$PINNED" >> "$GITHUB_ENV"
+          echo "pinned jax: $PINNED"
+
       - name: Install JAX nightly
         run: |
           uv pip install -U \
@@ -32,12 +38,24 @@ jobs:
             jax jaxlib
 
       - name: Assert head build actually installed
+        # Guards against the silent no-op install (leaving the pinned jax in
+        # place, which would fake a green canary).  A dev suffix is the normal
+        # head signature, but during a RELEASE WINDOW the nightly channel can
+        # serve the just-released stable (e.g. 0.11.0 on 2026-07-17, issue
+        # #11) — that is still newer than the pin and exactly worth testing,
+        # so strictly-newer-than-pinned also passes.
         run: |
           uv run --no-sync python -c "
+          import os, re
           import jax
           v = jax.__version__
-          print('jax', v)
-          assert 'dev' in v or '.dev' in v, f'NOT a head build: {v}'
+          pinned = os.environ['PINNED_JAX']
+          print('jax', v, '(pinned was', pinned + ')')
+          ok = 'dev' in v
+          if not ok:
+              nums = lambda s: tuple(int(x) for x in re.findall(r'\d+', s)[:3])
+              ok = nums(v) > nums(pinned)
+          assert ok, f'NOT a head build: {v} (pinned {pinned})'
           "
 
       - name: Test suite, warnings are errors
