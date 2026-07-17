@@ -54,7 +54,14 @@ jobs:
           ok = 'dev' in v
           if not ok:
               nums = lambda s: tuple(int(x) for x in re.findall(r'\d+', s)[:3])
-              ok = nums(v) > nums(pinned)
+              # >= not >: when the pin IS the just-released stable and no newer
+              # dev build exists yet (release window, e.g. 0.11.0 on
+              # 2026-07-17), installed == pinned is legitimate — it still means
+              # 'testing the newest available jax'. The silent-no-op blind spot
+              # this opens is confined to that window and self-heals when the
+              # first post-release dev nightly appears; an install that leaves
+              # an OLDER-than-pin jax is still caught.
+              ok = nums(v) >= nums(pinned)
           assert ok, f'NOT a head build: {v} (pinned {pinned})'
           "
 
