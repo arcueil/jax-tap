@@ -1,5 +1,5 @@
 #!/bin/bash
-# jax-tap RELEASE-CANDIDATE GPU validation (run on colossus, BEFORE tagging).
+# jax-tap RELEASE-CANDIDATE GPU validation (run on a CUDA host, BEFORE tagging).
 #
 # Tests the SOURCE TREE at a git ref (default: current main) on real CUDA, so
 # GPU-only issues are caught PRE-tag — e.g. jax.debug.callback ordering
