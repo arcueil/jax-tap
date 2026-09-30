@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased — 0.3.2
+
+- **Multi-device tests:** `tests/test_multidevice.py` covers jit over sharded
+  inputs, nested jit with explicit shardings, `shard_map` and `pmap` on two
+  devices. It skips below two devices; CI reruns it on two simulated CPU
+  devices, and the GPU release gate runs it on two GPUs
+  (`JAXTAP_REQUIRE_MULTIDEVICE=1` makes a missing device an error).
+
+### Known boundaries (documented)
+
+- `tap.record(f)` / `tap.verbose(f)` bind `shard_map` and `pmap` opaquely:
+  scans inside them emit no events, and no warning is raised. The context
+  form (`with tap.record():`) does see them, with one event per device per
+  step.
+- Per-device events (context form under `shard_map` / `pmap`) carry no device
+  or shard index; events from different devices share `path` and `step`.
+- The jit re-wrap's dropped shardings are now pinned by a test: with an inner
+  `out_shardings` that differs from what propagation would pick (e.g.
+  replicated), the tapped result comes back with a different sharding
+  (values stay bitwise-identical).
+
 ## 0.3.1 (2026-07-12)
 
 - **JAX-head compat: scan params (GitHub #9).** JAX ≥ 0.11 (head,

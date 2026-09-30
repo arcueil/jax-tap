@@ -47,6 +47,12 @@ cd repo
 echo "=== SUITE (GPU0, RC source) ===" >> "$OUT"
 CUDA_VISIBLE_DEVICES=0 ../env/bin/python -m pytest tests/ -q >> "$OUT" 2>&1
 
+echo "=== MULTI-GPU (GPU0+GPU1, RC source) ===" >> "$OUT"
+# Needs both GPUs: JAXTAP_REQUIRE_MULTIDEVICE=1 turns the module's
+# single-device skip into an error, so a 1-GPU host cannot pass this stage.
+CUDA_VISIBLE_DEVICES=0,1 JAXTAP_REQUIRE_MULTIDEVICE=1 \
+  ../env/bin/python -m pytest tests/test_multidevice.py -q -rxX >> "$OUT" 2>&1
+
 echo "=== DEMOS (GPU0) ===" >> "$OUT"
 for d in demo/*.py; do
   echo "--- $d" >> "$OUT"

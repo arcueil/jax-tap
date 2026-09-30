@@ -459,7 +459,7 @@ The flagship: `demo/blackjax_warmup_telemetry.py` instruments a real BlackJAX wa
 
 ## Known boundaries
 
-See `CHANGELOG.md` under "Known boundaries" for the complete documented list. In brief: `vmap×while_loop` includes masked lanes; taps riding `grad` observe the forward pass only (tap the differentiated function to observe backward); trace-time config travels with compiled artifacts on cache hits (host routing is live); the jit re-wrap does not thread donation/shardings.
+See `CHANGELOG.md` under "Known boundaries" for the complete documented list. In brief: `vmap×while_loop` includes masked lanes; taps riding `grad` observe the forward pass only (tap the differentiated function to observe backward); trace-time config travels with compiled artifacts on cache hits (host routing is live); the jit re-wrap does not thread donation/shardings; `tap.record(f)` does not see inside `shard_map`/`pmap` (the context form does, one event per device per step).
 
 ### `vmap`×`while_loop`: which call patterns are transparent
 

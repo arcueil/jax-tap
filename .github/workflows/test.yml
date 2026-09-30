@@ -31,3 +31,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --dev
       - run: uv run pytest -q
+      # tests/test_multidevice.py skips on one device; rerun it on two
+      # simulated CPU devices so sharding/shard_map/pmap paths run in CI.
+      - run: uv run pytest -q tests/test_multidevice.py
+        env:
+          XLA_FLAGS: --xla_force_host_platform_device_count=2
+          JAXTAP_REQUIRE_MULTIDEVICE: "1"

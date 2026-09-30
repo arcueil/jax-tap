@@ -18,8 +18,8 @@ is no manual version bump; do not edit a `version =` field.
    bash tools/gpu_rc_validate.sh main   # writes ~/arcueil/gpu-rc-validate/RESULTS.txt
    ```
 
-   Must be green: full test suite + all demos + bench on GPU, ending with the
-   `DONE_RC_GPU` sentinel. This catches GPU-only failures (e.g.
+   Must be green: full test suite + the multi-device tests on two GPUs + all
+   demos + bench, ending with the `DONE_RC_GPU` sentinel. This catches GPU-only failures (e.g.
    `jax.debug.callback(ordered=False)` cross-callback ordering, which differs
    CPU vs GPU — see the 0.3.1 test fix in `CHANGELOG.md`). **Do not tag until
    this is green.**
@@ -47,4 +47,7 @@ is no manual version bump; do not edit a `version =` field.
 - After any `uv sync`/`uv venv`, `jax[cuda13]` must be (re)installed; the
   scripts **assert `'cuda' in jax.devices()`** — a silent CPU fallback would
   void the run.
+- The MULTI-GPU stage runs `tests/test_multidevice.py` with
+  `CUDA_VISIBLE_DEVICES=0,1` and `JAXTAP_REQUIRE_MULTIDEVICE=1`, so it errors
+  (rather than skips) on a host with fewer than two GPUs.
 - Runtime is ~15–20 min (env install + suite + 10 demos + bench).
