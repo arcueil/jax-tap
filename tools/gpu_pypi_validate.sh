@@ -1,12 +1,12 @@
 #!/bin/bash
-# jax-tap GPU validation of the PUBLISHED PyPI artifact (run on colossus).
+# jax-tap GPU validation of the PUBLISHED PyPI artifact (run on a CUDA host).
 # One-shot, autonomous: writes RESULTS.txt and a DONE_PYPI_GPU sentinel.
 # Installs jax-tap[pandas] FROM PYPI (never the local tree); clones the repo
 # at the release tag ONLY for tests/ and demo/ (src-layout means the clone's
 # source is not importable — pytest exercises the installed wheel).
 set -uo pipefail
 
-# tmux one-shot shells are non-login: uv lives outside default PATH on colossus.
+# tmux one-shot shells are non-login: uv lives outside default PATH.
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 command -v uv >/dev/null || { echo "FATAL: uv not found on PATH" ; exit 1; }
 
